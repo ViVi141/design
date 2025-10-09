@@ -11,14 +11,43 @@
         </div>
       </template>
 
-      <!-- 搜索 -->
+      <!-- 搜索和筛选 -->
       <el-form :inline="true" :model="searchForm" class="search-form">
         <el-form-item label="目的地">
-          <el-input v-model="searchForm.destination" placeholder="搜索目的地" clearable />
+          <el-input v-model="searchForm.destination" placeholder="搜索目的地" clearable style="width: 200px;" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="searchForm.status" placeholder="全部状态" clearable style="width: 120px;">
+            <el-option label="草稿" value="draft" />
+            <el-option label="已确认" value="confirmed" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="天数">
+          <el-input-number v-model="searchForm.minDays" :min="1" :max="30" placeholder="最少" style="width: 100px;" />
+          <span style="margin: 0 5px;">-</span>
+          <el-input-number v-model="searchForm.maxDays" :min="1" :max="30" placeholder="最多" style="width: 100px;" />
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-select v-model="searchForm.sortBy" placeholder="排序方式" style="width: 150px;">
+            <el-option label="最新创建" value="created_desc" />
+            <el-option label="最早创建" value="created_asc" />
+            <el-option label="目的地A-Z" value="destination_asc" />
+            <el-option label="目的地Z-A" value="destination_desc" />
+            <el-option label="天数升序" value="days_asc" />
+            <el-option label="天数降序" value="days_desc" />
+            <el-option label="预算升序" value="budget_asc" />
+            <el-option label="预算降序" value="budget_desc" />
+          </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="loadTrips">搜索</el-button>
-          <el-button @click="resetSearch">重置</el-button>
+          <el-button type="primary" @click="loadTrips">
+            <el-icon><Search /></el-icon>
+            搜索
+          </el-button>
+          <el-button @click="resetSearch">
+            <el-icon><RefreshLeft /></el-icon>
+            重置
+          </el-button>
         </el-form-item>
       </el-form>
 
@@ -112,7 +141,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Search, RefreshLeft } from '@element-plus/icons-vue'
 import { getTrips, deleteTrip as deleteTripApi, optimizeTrip as optimizeTripApi, type Trip } from '@/api/trip'
 import dayjs from 'dayjs'
 
@@ -125,7 +154,11 @@ const pageSize = ref(20)
 const total = ref(0)
 
 const searchForm = ref({
-  destination: ''
+  destination: '',
+  status: '',
+  minDays: undefined as number | undefined,
+  maxDays: undefined as number | undefined,
+  sortBy: 'created_desc'
 })
 
 // 加载行程列表
@@ -143,8 +176,26 @@ const loadTrips = async () => {
     }
 
     const data = await getTrips(params)
-    trips.value = data as Trip[]
-    total.value = trips.value.length // 注意：实际项目中应该从后端返回总数
+    let filteredTrips = (data as Trip[]) || []
+    
+    // 前端筛选（如果后端不支持）
+    if (searchForm.value.status) {
+      filteredTrips = filteredTrips.filter(trip => trip.status === searchForm.value.status)
+    }
+    
+    if (searchForm.value.minDays !== undefined) {
+      filteredTrips = filteredTrips.filter(trip => trip.days >= (searchForm.value.minDays || 0))
+    }
+    
+    if (searchForm.value.maxDays !== undefined) {
+      filteredTrips = filteredTrips.filter(trip => trip.days <= (searchForm.value.maxDays || 999))
+    }
+    
+    // 排序
+    filteredTrips = sortTrips(filteredTrips, searchForm.value.sortBy)
+    
+    trips.value = filteredTrips
+    total.value = filteredTrips.length
   } catch (error) {
     ElMessage.error('加载失败')
   } finally {
@@ -152,9 +203,41 @@ const loadTrips = async () => {
   }
 }
 
+// 排序函数
+const sortTrips = (tripList: Trip[], sortBy: string) => {
+  const sorted = [...tripList]
+  
+  switch (sortBy) {
+    case 'created_desc':
+      return sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    case 'created_asc':
+      return sorted.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    case 'destination_asc':
+      return sorted.sort((a, b) => (a.destination || '').localeCompare(b.destination || '', 'zh-CN'))
+    case 'destination_desc':
+      return sorted.sort((a, b) => (b.destination || '').localeCompare(a.destination || '', 'zh-CN'))
+    case 'days_asc':
+      return sorted.sort((a, b) => (a.days || 0) - (b.days || 0))
+    case 'days_desc':
+      return sorted.sort((a, b) => (b.days || 0) - (a.days || 0))
+    case 'budget_asc':
+      return sorted.sort((a, b) => (a.budget || 0) - (b.budget || 0))
+    case 'budget_desc':
+      return sorted.sort((a, b) => (b.budget || 0) - (a.budget || 0))
+    default:
+      return sorted
+  }
+}
+
 // 重置搜索
 const resetSearch = () => {
-  searchForm.value.destination = ''
+  searchForm.value = {
+    destination: '',
+    status: '',
+    minDays: undefined,
+    maxDays: undefined,
+    sortBy: 'created_desc'
+  }
   currentPage.value = 1
   loadTrips()
 }
@@ -208,9 +291,9 @@ const deleteTrip = async (id: number) => {
   }
 }
 
-// 前往地图
+// 前往智能规划
 const goToMap = () => {
-  router.push('/map')
+  router.push('/ultimate-planner')
 }
 
 // 格式化日期
@@ -237,6 +320,14 @@ onMounted(() => {
 
 .search-form {
   margin-bottom: 20px;
+}
+
+.search-form .el-form-item {
+  margin-bottom: 10px;
+}
+
+:deep(.el-input-number) {
+  width: 100px;
 }
 
 .trip-detail {

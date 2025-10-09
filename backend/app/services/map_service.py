@@ -10,38 +10,61 @@ class MapService:
     """地图服务：封装高德API调用"""
     
     def __init__(self):
-        self.api_key = settings.AMAP_API_KEY
+        # Web服务API Key（用于后端REST API调用）
+        self.api_key = "REDACTED_API_KEYf"
         self.base_url = "https://restapi.amap.com/v3"
+        # POI查询缓存（减少重复查询）
+        self._poi_cache = {}
     
-    async def search_attractions(
+    async def search_attractions_v5(
         self, 
-        city: str, 
-        keyword: str = "景点",
-        types: str = "110000",
-        limit: int = 25
+        keywords: str,
+        region: str = None,
+        types: str = None,
+        city_limit: bool = False,
+        page_size: int = 25,
+        page_num: int = 1,
+        show_fields: str = "business,photos,navi"
     ) -> List[Dict]:
         """
-        搜索景点（调用高德POI API）
+        搜索景点（使用v5 POI搜索2.0，带缓存）
         
         Args:
-            city: 城市名称
-            keyword: 搜索关键词
-            types: 类型编码（110000=旅游景点）
-            limit: 返回数量
+            keywords: 搜索关键词
+            region: 搜索区划（城市名称/citycode/adcode）
+            types: POI类型编码
+            city_limit: 是否仅返回指定城市数据
+            page_size: 每页数量(1-25)
+            page_num: 页码
+            show_fields: 返回字段控制 business,photos,navi,children,indoor
             
         Returns:
             景点列表
         """
-        url = f"{self.base_url}/place/text"
+        # 检查缓存
+        cache_key = f"v5_{region}_{keywords}_{types}_{page_size}"
+        if cache_key in self._poi_cache:
+            print(f"[POI缓存v5] 命中: {keywords}")
+            return self._poi_cache[cache_key]
+        
+        url = "https://restapi.amap.com/v5/place/text"
         
         params = {
             'key': self.api_key,
-            'keywords': keyword,
-            'city': city,
-            'types': types,
-            'offset': limit,
-            'extensions': 'all'
+            'keywords': keywords,
+            'page_size': page_size,
+            'page_num': page_num,
+            'show_fields': show_fields
         }
+        
+        if region:
+            params['region'] = region
+        
+        if types:
+            params['types'] = types
+        
+        if city_limit:
+            params['city_limit'] = 'true'
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, params=params)
@@ -110,9 +133,69 @@ class MapService:
                     'photos': photos
                 })
             
+            # 缓存结果（限制缓存大小）
+            if len(self._poi_cache) < 1000:  # 最多缓存1000个
+                self._poi_cache[cache_key] = attractions
+            
             return attractions
         else:
             raise Exception(f"高德API错误: {data.get('info')}")
+    
+    async def get_weather(self, city: str) -> Optional[Dict]:
+        """获取城市天气预报（未来7天）"""
+        try:
+            # 1. 获取城市adcode
+            district_url = f"{self.base_url}/config/district"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(district_url, params={
+                    'key': self.api_key,
+                    'keywords': city,
+                    'subdistrict': 0
+                })
+                data = response.json()
+                
+                if data.get('status') != '1' or not data.get('districts'):
+                    return None
+                
+                adcode = data['districts'][0]['adcode']
+                
+                # 2. 获取天气信息
+                weather_url = f"{self.base_url}/weather/weatherInfo"
+                response = await client.get(weather_url, params={
+                    'key': self.api_key,
+                    'city': adcode,
+                    'extensions': 'all'
+                })
+                weather_data = response.json()
+                
+                if weather_data.get('status') != '1':
+                    return None
+                
+                forecasts = weather_data.get('forecasts', [])
+                if not forecasts:
+                    return None
+                
+                forecast = forecasts[0]
+                casts = forecast.get('casts', [])
+                
+                # 格式化数据
+                return {
+                    'city': forecast.get('city'),
+                    'forecasts': [{
+                        'date': c.get('date'),
+                        'week': c.get('week'),
+                        'day_weather': c.get('dayweather'),
+                        'night_weather': c.get('nightweather'),
+                        'day_temp': c.get('daytemp'),
+                        'night_temp': c.get('nighttemp'),
+                        'day_wind': c.get('daywind'),
+                        'day_power': c.get('daypower')
+                    } for c in casts[:7]]
+                }
+                
+        except Exception as e:
+            print(f"[天气API] 异常: {e}")
+            return None
     
     async def get_distance_matrix(
         self, 
@@ -227,6 +310,322 @@ class MapService:
             }
         else:
             raise Exception(f"高德API错误: {data.get('info')}")
+    
+    async def get_route_v5(
+        self,
+        origin: Tuple[float, float],
+        destination: Tuple[float, float],
+        mode: str = "driving",
+        strategy: int = None,
+        city: str = None,
+        show_fields: str = "cost,navi,polyline"
+    ) -> Optional[Dict]:
+        """
+        获取路线规划（使用v5 API - 路径规划2.0）
+        
+        Args:
+            origin: 起点坐标 (lng, lat)
+            destination: 终点坐标 (lng, lat)
+            mode: 出行方式 driving/walking/bicycling/electrobike/transit
+            strategy: 驾车策略 32=默认推荐，38=速度最快，0=速度优先
+            city: 城市citycode（transit需要）
+            show_fields: 返回字段控制 cost,navi,polyline
+            
+        Returns:
+            路线信息 {distance, duration, paths, tolls, traffic_lights, ...}
+        """
+        base_url = "https://restapi.amap.com/v5"
+        
+        # 构建URL
+        if mode == "transit":
+            url = f"{base_url}/direction/transit/integrated"
+        else:
+            url = f"{base_url}/direction/{mode}"
+        
+        params = {
+            'key': self.api_key,
+            'origin': f"{origin[0]},{origin[1]}",
+            'destination': f"{destination[0]},{destination[1]}",
+            'show_fields': show_fields
+        }
+        
+        # 驾车特有参数
+        if mode == "driving":
+            params['strategy'] = strategy if strategy is not None else 32  # 默认推荐
+            params['ferry'] = 0  # 使用轮渡
+        
+        # 步行特有参数
+        if mode == "walking":
+            params['alternative_route'] = 1  # 返回1条路线
+        
+        # 公交特有参数
+        if mode == "transit":
+            if not city:
+                city = "010"  # 默认北京citycode
+            params['city1'] = city
+            params['city2'] = city
+            params['strategy'] = 0  # 0=推荐，1=最经济，2=最少换乘，8=时间短
+            params['AlternativeRoute'] = 3  # 返回3条方案
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(url, params=params)
+                data = response.json()
+            
+            if data.get('status') == '1':
+                route = data.get('route')
+                print(f"[路径规划v5] {mode}路线规划成功")
+                return route
+            else:
+                print(f"[路径规划v5] 错误: {data.get('info')}, infocode: {data.get('infocode')}")
+                return None
+        except Exception as e:
+            print(f"[路径规划v5] 异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def get_input_tips(
+        self,
+        keywords: str,
+        city: str = None,
+        location: Tuple[float, float] = None,
+        datatype: str = "all",
+        citylimit: bool = False
+    ) -> List[Dict]:
+        """
+        获取输入提示（自动补全建议）
+        
+        Args:
+            keywords: 查询关键词
+            city: 城市（citycode或adcode）
+            location: 优先返回此坐标附近的结果
+            datatype: 数据类型 all/poi/bus/busline
+            citylimit: 是否仅返回指定城市数据
+            
+        Returns:
+            建议列表
+        """
+        url = f"{self.base_url}/assistant/inputtips"
+        
+        params = {
+            'key': self.api_key,
+            'keywords': keywords,
+            'output': 'json'
+        }
+        
+        if city:
+            params['city'] = city
+        
+        if location:
+            params['location'] = f"{location[0]},{location[1]}"
+        
+        if datatype:
+            params['datatype'] = datatype
+        
+        if citylimit:
+            params['citylimit'] = 'true'
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                data = response.json()
+            
+            if data.get('status') == '1':
+                tips = data.get('tips', [])
+                return tips
+            else:
+                print(f"[输入提示] 错误: {data.get('info')}")
+                return []
+        except Exception as e:
+            print(f"[输入提示] 异常: {e}")
+            return []
+    
+    async def search_around(
+        self,
+        location: Tuple[float, float],
+        keywords: str = None,
+        types: str = None,
+        radius: int = 5000,
+        region: str = None,
+        city_limit: bool = False,
+        sortrule: str = "distance",
+        page_size: int = 25
+    ) -> List[Dict]:
+        """
+        周边搜索（v5 API）
+        
+        Args:
+            location: 中心点坐标 (lng, lat)
+            keywords: 关键词
+            types: POI类型
+            radius: 半径(0-50000米)
+            region: 区域
+            city_limit: 是否限制在指定城市
+            sortrule: 排序规则 distance/weight
+            page_size: 每页数量
+            
+        Returns:
+            POI列表
+        """
+        url = "https://restapi.amap.com/v5/place/around"
+        
+        params = {
+            'key': self.api_key,
+            'location': f"{location[0]},{location[1]}",
+            'radius': radius,
+            'sortrule': sortrule,
+            'page_size': page_size,
+            'show_fields': 'business,photos'
+        }
+        
+        if keywords:
+            params['keywords'] = keywords
+        
+        if types:
+            params['types'] = types
+        
+        if region:
+            params['region'] = region
+        
+        if city_limit:
+            params['city_limit'] = 'true'
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                data = response.json()
+            
+            if data.get('status') == '1':
+                pois = data.get('pois', [])
+                return self._parse_pois_v5(pois)
+            else:
+                print(f"[周边搜索] 错误: {data.get('info')}")
+                return []
+        except Exception as e:
+            print(f"[周边搜索] 异常: {e}")
+            return []
+    
+    async def get_poi_detail(
+        self,
+        poi_ids: List[str],
+        show_fields: str = "business,photos,navi,children"
+    ) -> List[Dict]:
+        """
+        ID搜索（v5 API）
+        
+        Args:
+            poi_ids: POI ID列表（最多10个）
+            show_fields: 返回字段控制
+            
+        Returns:
+            POI详情列表
+        """
+        url = "https://restapi.amap.com/v5/place/detail"
+        
+        params = {
+            'key': self.api_key,
+            'id': '|'.join(poi_ids[:10]),
+            'show_fields': show_fields
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                data = response.json()
+            
+            if data.get('status') == '1':
+                pois = data.get('pois', [])
+                return self._parse_pois_v5(pois)
+            else:
+                print(f"[POI详情] 错误: {data.get('info')}")
+                return []
+        except Exception as e:
+            print(f"[POI详情] 异常: {e}")
+            return []
+    
+    def _parse_pois_v5(self, pois: List[Dict]) -> List[Dict]:
+        """解析v5 POI数据"""
+        results = []
+        for poi in pois:
+            location = poi.get('location', '').split(',')
+            if len(location) != 2:
+                continue
+            
+            lng = float(location[0])
+            lat = float(location[1])
+            
+            # 商业信息
+            business = poi.get('business', {})
+            rating = float(business.get('rating', 0)) if business.get('rating') else 0
+            cost = business.get('cost', '')
+            tel = business.get('tel', '')
+            opentime = business.get('opentime_today', '')
+            business_area = business.get('business_area', '')
+            
+            # 图片
+            photos = []
+            photos_data = poi.get('photos', [])
+            if photos_data:
+                photos = [p.get('url', '') for p in photos_data if p.get('url')]
+            
+            # 导航信息
+            navi = poi.get('navi', {})
+            
+            results.append({
+                'id': poi.get('id', ''),
+                'name': poi.get('name', ''),
+                'lng': lng,
+                'lat': lat,
+                'type': poi.get('type', ''),
+                'typecode': poi.get('typecode', ''),
+                'address': poi.get('address', ''),
+                'pname': poi.get('pname', ''),
+                'cityname': poi.get('cityname', ''),
+                'adname': poi.get('adname', ''),
+                'pcode': poi.get('pcode', ''),
+                'citycode': poi.get('citycode', ''),
+                'adcode': poi.get('adcode', ''),
+                'rating': rating,
+                'cost': cost,
+                'tel': tel,
+                'opentime': opentime,
+                'photos': photos,
+                'business_area': business_area,
+                'navi_poiid': navi.get('navi_poiid', ''),
+                'entr_location': navi.get('entr_location', ''),
+                'exit_location': navi.get('exit_location', '')
+            })
+        
+        return results
+    
+    async def search_attractions(
+        self, 
+        city: str, 
+        keyword: str = "景点",
+        types: str = "110000",
+        limit: int = 25
+    ) -> List[Dict]:
+        """
+        搜索景点（兼容旧版本，调用v5）
+        
+        Args:
+            city: 城市名称
+            keyword: 搜索关键词
+            types: 类型编码
+            limit: 返回数量
+            
+        Returns:
+            景点列表
+        """
+        return await self.search_attractions_v5(
+            keywords=keyword,
+            region=city,
+            types=types,
+            city_limit=True,
+            page_size=min(limit, 25),
+            show_fields="business,photos,navi"
+        )
     
     def calculate_distance(
         self,

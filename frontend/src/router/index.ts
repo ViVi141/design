@@ -3,7 +3,7 @@ import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/dashboard'
+    redirect: '/ultimate-planner'
   },
   {
     path: '/dashboard',
@@ -17,8 +17,16 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/planner',
-    name: 'Planner',
-    component: () => import('@/views/planner/PlannerViewV3.vue')
+    redirect: '/ultimate-planner'
+  },
+  {
+    path: '/smart-planner',
+    redirect: '/ultimate-planner'
+  },
+  {
+    path: '/ultimate-planner',
+    name: 'UltimatePlanner',
+    component: () => import('@/views/planner/UltimatePlannerView.vue')
   },
   {
     path: '/chat',

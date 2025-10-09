@@ -13,26 +13,23 @@
             mode="horizontal"
             :ellipsis="false"
             @select="handleMenuSelect"
+            class="main-menu"
           >
             <el-menu-item index="/dashboard">
               <el-icon><House /></el-icon>
               <span>首页</span>
             </el-menu-item>
-            <el-menu-item index="/planner">
+            <el-menu-item index="/ultimate-planner">
               <el-icon><MagicStick /></el-icon>
-              <span>智能规划</span>
-            </el-menu-item>
-            <el-menu-item index="/map">
-              <el-icon><MapLocation /></el-icon>
-              <span>地图浏览</span>
-            </el-menu-item>
-            <el-menu-item index="/chat">
-              <el-icon><ChatDotRound /></el-icon>
-              <span>AI对话</span>
+              <span>AI智能规划</span>
             </el-menu-item>
             <el-menu-item index="/trips">
               <el-icon><Document /></el-icon>
               <span>我的行程</span>
+            </el-menu-item>
+            <el-menu-item index="/map">
+              <el-icon><MapLocation /></el-icon>
+              <span>地图浏览</span>
             </el-menu-item>
           </el-menu>
         </div>

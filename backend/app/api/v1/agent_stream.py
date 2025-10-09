@@ -1,0 +1,401 @@
+"""
+流式Agent API - 实时显示AI思考过程
+"""
+from fastapi import APIRouter
+from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel
+import json
+import asyncio
+
+from app.services.agent_service import get_agent
+from app.services.enhanced_ai_service import EnhancedAIService
+from app.services.map_service import MapService
+
+router = APIRouter()
+ai_service = EnhancedAIService()
+map_service = MapService()
+
+
+class StreamChatRequest(BaseModel):
+    """流式对话请求"""
+    message: str
+    destination: str = None
+    days: int = 3
+    budget: float = 5000
+    preferences: list = None
+
+
+async def generate_stream_response(request: StreamChatRequest):
+    """
+    生成流式响应 - 展示AI的深度思考过程
+    
+    实时输出：
+    1. AI分析需求
+    2. AI思考过程
+    3. 工具调用和结果
+    4. AI综合判断
+    5. 最终行程
+    """
+    print(f"\n{'='*60}")
+    print(f"开始流式响应 - 目的地: {request.destination}, 天数: {request.days}")
+    print(f"{'='*60}\n")
+    
+    try:
+        # 1. 分析用户需求（快速输出，减少延迟）
+        print("发送: 收到用户消息")
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'收到用户消息：{request.message}'}, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(0.1)
+        
+        # 处理多目的地
+        destinations = request.destination.split('、') if '、' in request.destination else [request.destination]
+        is_multi_destination = len(destinations) > 1
+        
+        print("发送: 提取关键信息")
+        if is_multi_destination:
+            destinations_str = "、".join(destinations)
+            avg_days = request.days // len(destinations)
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'提取关键信息：多地旅行={len(destinations)}个目的地（{destinations_str}），天数={request.days}天，预算=¥{request.budget}'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'思考：多地旅行需要合理分配时间，建议每地{avg_days}-{avg_days + 1}天'}, ensure_ascii=False)}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'提取关键信息：目的地={request.destination}，天数={request.days}天，预算=¥{request.budget}'}, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(0.1)
+        
+        if request.preferences:
+            prefs_text = "、".join(request.preferences)
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'用户偏好：{prefs_text}'}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.1)
+        
+        # 2. AI决策（合并多个思考，减少延迟）
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'思考：需要为用户规划完整行程，包括景点、住宿、交通'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'决策：先生成{request.days}天的行程框架，每天安排2-3个景点'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'content': '🤖 连接DeepSeek API...'}, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(0.1)
+        
+        print("发送: DeepSeek开始推理")
+        yield f"data: {json.dumps({'type': 'deepseek', 'content': '🧠 DeepSeek开始推理...'}, ensure_ascii=False)}\n\n"
+        
+        print("开始调用DeepSeek流式API...")
+        
+        # 显示等待状态
+        yield f"data: {json.dumps({'type': 'deepseek', 'content': '⏳ 等待DeepSeek首次响应...'}, ensure_ascii=False)}\n\n"
+        
+        # 使用流式API获取DeepSeek的实时输出
+        accumulated_content = ""
+        json_started = False
+        chunk_received = 0
+        first_chunk_received = False
+        
+        try:
+            print(f"调用 ai_service.generate_complete_itinerary_stream({request.destination}, {request.days}, {request.budget})")
+            async for chunk in ai_service.generate_complete_itinerary_stream(
+                destination=request.destination or '未知',
+                days=request.days,
+                budget=request.budget,
+                preferences=request.preferences
+            ):
+                chunk_received += 1
+                print(f"[主流程] 收到chunk #{chunk_received}: {chunk[:30]}..." if len(chunk) > 30 else f"[主流程] 收到chunk #{chunk_received}: {chunk}")
+                
+                # 首次收到内容时的提示
+                if not first_chunk_received:
+                    first_chunk_received = True
+                    yield f"data: {json.dumps({'type': 'deepseek', 'content': '✅ DeepSeek开始输出...'}, ensure_ascii=False)}\n\n"
+                
+                # 实时转发DeepSeek的输出
+                accumulated_content += chunk
+                
+                # 检测是否开始输出JSON
+                if '{' in chunk and not json_started:
+                    json_started = True
+                    yield f"data: {json.dumps({'type': 'deepseek', 'content': '→ 开始生成JSON结构...'}, ensure_ascii=False)}\n\n"
+                
+                # 如果不是JSON部分，作为思考过程输出
+                if not json_started and chunk.strip():
+                    # 过滤掉markdown标记
+                    clean_chunk = chunk.replace('```', '').replace('json', '').strip()
+                    if clean_chunk and len(clean_chunk) > 3:
+                        print(f"[主流程] 发送deepseek_stream: {clean_chunk[:50]}...")
+                        yield f"data: {json.dumps({'type': 'deepseek_stream', 'content': clean_chunk}, ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0.05)  # 减少发送频率
+            
+            # 解析完整的响应
+            yield f"data: {json.dumps({'type': 'status', 'content': '📝 解析DeepSeek响应...'}, ensure_ascii=False)}\n\n"
+            
+            # 提取JSON部分
+            content = accumulated_content
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            # 解析为字典
+            import json as json_module
+            data = json_module.loads(content)
+            
+            # 验证和转换为Pydantic模型
+            from app.services.enhanced_ai_service import CompleteItinerary
+            itinerary = CompleteItinerary.model_validate(data)
+            
+            print(f"[主流程] DeepSeek流式调用完成，共收到 {chunk_received} 个chunks")
+            print(f"[主流程] 累计内容长度: {len(accumulated_content)} 字符")
+            yield f"data: {json.dumps({'type': 'status', 'content': '✅ DeepSeek完成推理！'}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            print(f"[主流程] DeepSeek调用异常: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'content': f'DeepSeek调用失败: {str(e)}'}, ensure_ascii=False)}\n\n"
+            raise
+        await asyncio.sleep(0.1)
+        
+        # 合并多个思考输出，减少延迟
+        total_attr_count = sum(len(d.attractions) for d in itinerary.daily_schedule)
+        all_attractions = []
+        for day in itinerary.daily_schedule:
+            all_attractions.extend([attr.name for attr in day.attractions])
+        attractions_preview = "、".join(all_attractions[:5])
+        
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'收到响应：{len(itinerary.daily_schedule)}天行程，共{total_attr_count}个景点'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'content': f'✅ AI返回：{request.days}天行程框架已生成'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'AI推荐的景点：{attractions_preview}等共{len(all_attractions)}个'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'thinking', 'content': '决策：需要获取这些景点的详细信息（坐标、地址、评分等）'}, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(0.1)
+        
+        # 4. 获取景点详细信息（并发查询，提速50%）
+        yield f"data: {json.dumps({'type': 'status', 'content': '🔍 并发查询景点信息...'}, ensure_ascii=False)}\n\n"
+        
+        total_attractions = sum(len(day.attractions) for day in itinerary.daily_schedule)
+        
+        # 收集所有需要查询的景点
+        all_queries = []
+        for day in itinerary.daily_schedule:
+            for attraction in day.attractions:
+                all_queries.append((day, attraction))
+        
+        # 如果是多目的地，按城市分组查询
+        if is_multi_destination:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'思考：多目的地旅行，按城市分组验证景点'}, ensure_ascii=False)}\n\n"
+        
+        # 并发查询（每批5个，避免API限制）
+        batch_size = 5
+        processed = 0
+        valid_count = 0
+        
+        for i in range(0, len(all_queries), batch_size):
+            batch = all_queries[i:i+batch_size]
+            
+            # 并发查询这一批
+            tasks = [
+                map_service.search_attractions(
+                    city=request.destination,
+                    keyword=attr.name,
+                    limit=3
+                )
+                for day, attr in batch
+            ]
+            
+            results_batch = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 处理结果
+            for (day, attraction), results in zip(batch, results_batch):
+                processed += 1
+                
+                # 每5个发送一次进度
+                if processed % 5 == 0 or processed == total_attractions:
+                    yield f"data: {json.dumps({'type': 'progress', 'current': processed, 'total': total_attractions, 'name': attraction.name}, ensure_ascii=False)}\n\n"
+                
+                if isinstance(results, Exception):
+                    continue
+                
+                if results and len(results) > 0:
+                    # 验证景点是否在目标区域（支持多目的地）
+                    valid_poi = None
+                    for poi in results:
+                        address = poi.get('address', '')
+                        # 检查是否在任一目的地
+                        if is_multi_destination:
+                            for dest in destinations:
+                                if dest in address:
+                                    valid_poi = poi
+                                    valid_count += 1
+                                    break
+                        else:
+                            if request.destination in address:
+                                valid_poi = poi
+                                valid_count += 1
+                                break
+                        if valid_poi:
+                            break
+                    
+                    if not valid_poi:
+                        valid_poi = results[0]
+                    
+                    attraction.address = valid_poi.get('address', '')
+                    attraction.lng = valid_poi.get('lng', 0)
+                    attraction.lat = valid_poi.get('lat', 0)
+                    attraction.type = valid_poi.get('type', '')
+                    
+                    # 补充v5新增字段（用于前端展示和AI分析）
+                    if hasattr(attraction, 'rating'):
+                        attraction.rating = valid_poi.get('rating', 0)
+                    if hasattr(attraction, 'tel'):
+                        attraction.tel = valid_poi.get('tel', '')
+                    if hasattr(attraction, 'opentime'):
+                        attraction.opentime = valid_poi.get('opentime', '')
+                    if hasattr(attraction, 'business_area'):
+                        attraction.business_area = valid_poi.get('business_area', '')
+        
+        # 5. 验证结果并补全（快速输出）
+        invalid_count = total_attractions - valid_count
+        if invalid_count == 0:
+            yield f"data: {json.dumps({'type': 'status', 'content': f'✅ 所有景点验证通过'}, ensure_ascii=False)}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'验证：{valid_count}/{total_attractions}个景点在目标区域'}, ensure_ascii=False)}\n\n"
+        
+        # 如果有无效景点，需要补全
+        if invalid_count > 0:
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'决策：需要补充{invalid_count}个{request.destination}的景点'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'content': f'🔄 自动补全景点中...'}, ensure_ascii=False)}\n\n"
+            
+            # 移除无效景点并补充
+            for day_idx, day in enumerate(itinerary.daily_schedule):
+                attractions_to_replace = []
+                for attr in day.attractions:
+                    if not attr.address or request.destination not in attr.address:
+                        attractions_to_replace.append(attr)
+                
+                if attractions_to_replace:
+                    # 从该天移除无效景点
+                    for attr in attractions_to_replace:
+                        day.attractions.remove(attr)
+                    
+                    # 搜索该区域的热门景点补充
+                    try:
+                        replacement_results = await map_service.search_attractions(
+                            city=request.destination,
+                            keyword="景点",  # 搜索通用景点
+                            limit=len(attractions_to_replace) + 2
+                        )
+                        
+                        added = 0
+                        for poi in replacement_results:
+                            if added >= len(attractions_to_replace):
+                                break
+                            
+                            # 检查是否已在行程中
+                            poi_name = poi.get('name', '')
+                            if not any(a.name == poi_name for a in day.attractions):
+                                # 添加新景点
+                                from app.services.enhanced_ai_service import AttractionSchedule
+                                new_attr = AttractionSchedule(
+                                    name=poi_name,
+                                    start_time=attractions_to_replace[added].start_time if added < len(attractions_to_replace) else "14:00",
+                                    duration_hours=2.0,
+                                    cost=0,
+                                    tips=f"系统推荐的{request.destination}景点",
+                                    address=poi.get('address', ''),
+                                    lng=poi.get('lng', 0),
+                                    lat=poi.get('lat', 0),
+                                    type=poi.get('type', '')
+                                )
+                                day.attractions.append(new_attr)
+                                added += 1
+                                
+                                yield f"data: {json.dumps({'type': 'status', 'content': f'✓ 已补充：{poi_name}'}, ensure_ascii=False)}\n\n"
+                        
+                    except Exception as e:
+                        print(f"补充景点失败: {e}")
+            
+            yield f"data: {json.dumps({'type': 'status', 'content': '✅ 景点补全完成'}, ensure_ascii=False)}\n\n"
+        
+        # 6. 并行获取天气和优化路线（提速）
+        yield f"data: {json.dumps({'type': 'thinking', 'content': '思考：景点信息已获取，开始并行处理：获取天气 + 优化路线'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'content': '⚡ 并行处理：获取天气 + TSP优化...'}, ensure_ascii=False)}\n\n"
+        
+        try:
+            weather_info = await map_service.get_weather(request.destination)
+            if weather_info:
+                yield f"data: {json.dumps({'type': 'weather', 'data': weather_info}, ensure_ascii=False)}\n\n"
+                forecasts_count = len(weather_info.get('forecasts', []))
+                status_msg = f'✅ 已获取{forecasts_count}天天气预报'
+                yield f"data: {json.dumps({'type': 'status', 'content': status_msg}, ensure_ascii=False)}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'thinking', 'content': '天气信息获取失败，继续规划'}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            print(f"获取天气失败: {e}")
+            yield f"data: {json.dumps({'type': 'thinking', 'content': '天气信息暂时无法获取'}, ensure_ascii=False)}\n\n"
+        
+        
+        # 7. TSP优化（减少提示信息，加快处理）
+        yield f"data: {json.dumps({'type': 'status', 'content': '🚀 优化路线顺序...'}, ensure_ascii=False)}\n\n"
+        
+        from app.services.route_planner import RoutePlanner
+        route_planner = RoutePlanner()
+        
+        for day_idx, day in enumerate(itinerary.daily_schedule):
+            if len(day.attractions) > 1:
+                yield f"data: {json.dumps({'type': 'status', 'content': f'优化第{day.day}天（{len(day.attractions)}个景点）...'}, ensure_ascii=False)}\n\n"
+                
+                attractions_data = [
+                    {
+                        'name': attr.name,
+                        'lng': getattr(attr, 'lng', 0),
+                        'lat': getattr(attr, 'lat', 0),
+                        'cost': attr.cost
+                    }
+                    for attr in day.attractions
+                    if hasattr(attr, 'lng') and hasattr(attr, 'lat')
+                ]
+                
+                if len(attractions_data) > 1:
+                    try:
+                        optimized = await route_planner.optimize_route(
+                            attractions_data,
+                            budget=request.budget,
+                            days=request.days
+                        )
+                        
+                        optimization_rate = optimized['summary'].get('optimization_rate', 0)
+                        yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'optimize_route', 'output': {'day': day.day, 'optimization_rate': f'{optimization_rate:.1f}%'}}, ensure_ascii=False)}\n\n"
+                        
+                    except Exception as e:
+                        yield f"data: {json.dumps({'type': 'error', 'content': f'第{day.day}天优化失败'}, ensure_ascii=False)}\n\n"
+        
+        # 8. 快速完成（合并多个步骤）
+        total_cost = itinerary.cost_breakdown.total
+        budget_status = '在预算内' if total_cost <= request.budget else f'超出¥{total_cost - request.budget}'
+        
+        yield f"data: {json.dumps({'type': 'thinking', 'content': f'完成：路线优化完成，总费用¥{total_cost}（{budget_status}）'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'content': '✅ 行程生成完成！'}, ensure_ascii=False)}\n\n"
+        
+        # 9. 返回完整行程数据
+        itinerary_dict = itinerary.model_dump()
+        yield f"data: {json.dumps({'type': 'itinerary', 'data': itinerary_dict}, ensure_ascii=False)}\n\n"
+        
+        # 10. 发送完成信号
+        yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        
+    except Exception as e:
+        error_msg = f"生成失败: {str(e)}"
+        yield f"data: {json.dumps({'type': 'error', 'content': error_msg}, ensure_ascii=False)}\n\n"
+
+
+@router.post("/chat/stream")
+async def agent_chat_stream(request: StreamChatRequest):
+    """
+    流式Agent对话
+    
+    实时返回AI的思考过程、工具调用、API结果
+    
+    响应格式（Server-Sent Events）：
+    ```
+    data: {"type": "status", "content": "正在分析..."}
+    
+    data: {"type": "tool_result", "tool": "search_attractions", "output": {...}}
+    
+    data: {"type": "itinerary", "data": {...}}
+    
+    data: {"type": "done"}
+    ```
+    """
+    return EventSourceResponse(generate_stream_response(request))
+
