@@ -1,5 +1,5 @@
 """
-路径规划服务：使用OR-Tools优化TSP
+路径规划服务：使用OR-Tools优化TSP + 高德地图真实路线数据
 """
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
@@ -8,13 +8,16 @@ import numpy as np
 
 from app.core.config import settings
 from app.services.map_service import MapService
+from app.services.route_service import RouteService
+from app.core.city_mapping import get_citycode, get_adcode, SUPPORTED_CITIES
 
 
 class RoutePlanner:
-    """路径规划服务：使用OR-Tools优化TSP"""
+    """路径规划服务：使用OR-Tools优化TSP + 高德地图真实数据"""
     
     def __init__(self):
         self.map_service = MapService()
+        self.route_service = RouteService()  # 新增：高德路线服务
         self.max_attractions = settings.MAX_ATTRACTIONS
         self.time_limit = settings.TSP_TIME_LIMIT
     
@@ -23,7 +26,8 @@ class RoutePlanner:
         attractions: List[Dict],
         constraints: Dict = None,
         budget: float = 5000,
-        days: int = 3
+        days: int = 3,
+        city: str = "北京"  # 新增城市参数
     ) -> Dict:
         """
         优化景点访问顺序
@@ -40,18 +44,19 @@ class RoutePlanner:
         # 策略1：景点数量≤12个，使用TSP（最优解）
         if n <= self.max_attractions:
             print(f"使用TSP算法优化 {n} 个景点")
-            return await self._optimize_with_tsp(attractions, budget, days)
+            return await self._optimize_with_tsp(attractions, budget, days, city)
         
         # 策略2：景点数量过多，使用贪心算法
         else:
             print(f"景点数量 {n} 超过限制，使用贪心算法")
-            return await self._optimize_with_greedy(attractions, budget, days)
+            return await self._optimize_with_greedy(attractions, budget, days, city)
     
     async def _optimize_with_tsp(
         self, 
         attractions: List[Dict],
         budget: float = 5000,
-        days: int = 3
+        days: int = 3,
+        city: str = "北京"
     ) -> Dict:
         """使用TSP算法优化"""
         
@@ -66,16 +71,16 @@ class RoutePlanner:
         # 3. 按优化顺序重排景点
         optimal_attractions = [attractions[i] for i in optimal_indices]
         
-        # 4. 获取详细路线（考虑预算）
+        # 4. 获取详细路线（考虑预算和城市）
         print("获取详细路线...")
         budget_per_day = budget / days if days > 0 else 500
-        routes = await self._get_detailed_routes(optimal_attractions, budget_per_day)
+        routes = await self._get_detailed_routes(optimal_attractions, budget_per_day, city)
         
         # 5. 计算统计信息
         summary = self._calculate_summary(optimal_attractions, routes)
         
         # 6. 计算优化率（与原始顺序对比）
-        original_distance = await self._calculate_total_distance(attractions)
+        original_distance = await self._calculate_total_distance(attractions, city)
         optimized_distance = summary['total_distance_km'] * 1000
         if original_distance > 0:
             summary['optimization_rate'] = (original_distance - optimized_distance) / original_distance * 100
@@ -91,7 +96,8 @@ class RoutePlanner:
         self, 
         attractions: List[Dict],
         budget: float = 5000,
-        days: int = 3
+        days: int = 3,
+        city: str = "北京"
     ) -> Dict:
         """使用贪心算法优化"""
         
@@ -114,7 +120,7 @@ class RoutePlanner:
         
         # 获取详细路线
         budget_per_day = budget / days if days > 0 else 500
-        routes = await self._get_detailed_routes(route, budget_per_day)
+        routes = await self._get_detailed_routes(route, budget_per_day, city)
         
         # 计算统计信息
         summary = self._calculate_summary(route, routes)
@@ -219,24 +225,30 @@ class RoutePlanner:
     async def _get_detailed_routes(
         self, 
         attractions: List[Dict], 
-        budget_per_day: float = 500
+        budget_per_day: float = 500,
+        city: str = "北京"
     ) -> List[Dict]:
         """
-        获取详细路线（每两个景点之间）
+        获取详细路线（使用高德地图真实API数据）
+        
         智能选择交通方式：
-        - 距离<2km：步行
-        - 距离2-10km：根据预算选择（紧张→公交，宽裕→出租车）
-        - 距离>10km：根据预算选择（紧张→地铁/公交，宽裕→出租车）
+        - 距离<2km：步行（高德步行API）
+        - 距离2-10km：根据预算选择公交（高德公交API）或出租车（高德驾车API）
+        - 距离>10km：根据预算选择地铁/公交或出租车
         
         Args:
             attractions: 排序后的景点列表
             budget_per_day: 每天预算（用于判断是否紧张）
+            city: 城市名称（用于公交查询）
             
         Returns:
-            路线列表
+            路线列表（包含真实的距离、时间、费用数据）
         """
         routes = []
         budget_tight = budget_per_day < 300  # 预算紧张阈值
+        
+        # 获取城市citycode（智能查找，支持100+城市）
+        city_code = get_citycode(city)
         
         for i in range(len(attractions) - 1):
             origin = (attractions[i]['lng'], attractions[i]['lat'])
@@ -245,47 +257,132 @@ class RoutePlanner:
             # 先计算直线距离，用于决策交通方式
             straight_distance = self.map_service.calculate_distance(origin, destination)
             
-            # 智能决策交通方式
-            mode, transport_type = self._decide_transport_mode(
+            # 检查是否跨城市
+            from_city = attractions[i].get('city', city)
+            to_city = attractions[i+1].get('city', city)
+            is_intercity = from_city != to_city
+            
+            # 智能决策交通方式（考虑跨城市情况）
+            _, transport_type = self._decide_transport_mode(
                 straight_distance, 
-                budget_tight
+                budget_tight,
+                is_intercity=is_intercity
             )
             
             try:
-                # 调用高德API获取实际路线
-                route = await self.map_service.get_route(origin, destination, mode)
+                # 根据交通方式调用不同的高德API
+                if transport_type == '步行':
+                    # 调用高德步行路线API (v5)
+                    route_data = await self.route_service.get_walking_route(origin, destination)
+                    
+                    if route_data:
+                        routes.append({
+                            'from_idx': i,
+                            'to_idx': i + 1,
+                            'from_name': attractions[i]['name'],
+                            'to_name': attractions[i+1]['name'],
+                            'distance': route_data['distance'],  # 真实距离
+                            'duration': route_data['duration'],  # 真实时间
+                            'mode': '步行',
+                            'cost': 0,  # 步行免费
+                            'polyline': route_data.get('polyline', ''),
+                            'suggestion': self._get_transport_suggestion(
+                                route_data['distance'], 
+                                '步行',
+                                budget_tight
+                            )
+                        })
+                        print(f"  {attractions[i]['name']} → {attractions[i+1]['name']}: "
+                              f"{route_data['distance']/1000:.1f}km, 步行, 免费 [高德API]")
+                    else:
+                        raise Exception("步行路线API返回空")
                 
-                # 估算费用
-                cost = self._estimate_transport_cost(
-                    route['distance'], 
-                    transport_type
-                )
-                
-                routes.append({
-                    'from_idx': i,
-                    'to_idx': i + 1,
-                    'from_name': attractions[i]['name'],
-                    'to_name': attractions[i+1]['name'],
-                    'distance': route['distance'],
-                    'duration': route['duration'],
-                    'mode': transport_type,  # 显示给用户的交通方式
-                    'cost': cost,
-                    'polyline': route.get('polyline', ''),
-                    'suggestion': self._get_transport_suggestion(
-                        straight_distance, 
-                        transport_type,
-                        budget_tight
+                elif transport_type in ['公交', '地铁', '地铁/公交']:
+                    # 调用高德公交路线API (v5)
+                    route_data = await self.route_service.get_transit_route(
+                        origin, 
+                        destination,
+                        city1=city_code,  # 使用真实城市code
+                        city2=city_code
                     )
-                })
+                    
+                    if route_data and route_data.get('plans'):
+                        # 取第一个方案（推荐方案）
+                        plan = route_data['plans'][0]
+                        
+                        routes.append({
+                            'from_idx': i,
+                            'to_idx': i + 1,
+                            'from_name': attractions[i]['name'],
+                            'to_name': attractions[i+1]['name'],
+                            'distance': plan['distance'],  # 真实距离
+                            'duration': plan['duration'],  # 真实时间
+                            'mode': transport_type,
+                            'cost': plan['transit_fee'],  # 真实公交费用
+                            'polyline': '',
+                            'lines': plan.get('lines', []),  # 乘坐线路
+                            'suggestion': self._get_transport_suggestion(
+                                plan['distance'], 
+                                transport_type,
+                                budget_tight
+                            )
+                        })
+                        print(f"  {attractions[i]['name']} → {attractions[i+1]['name']}: "
+                              f"{plan['distance']/1000:.1f}km, {transport_type}, ¥{plan['transit_fee']:.1f} [高德API]")
+                    else:
+                        raise Exception("公交路线API返回空")
                 
-                print(f"  {attractions[i]['name']} → {attractions[i+1]['name']}: "
-                      f"{route['distance']/1000:.1f}km, {transport_type}, ¥{cost}")
+                elif transport_type in ['出租车', '出租车/网约车']:
+                    # 调用高德驾车路线API (v5) - 包含预估出租车费用
+                    route_data = await self.route_service.get_driving_route(origin, destination)
+                    
+                    if route_data:
+                        # 高德API返回的taxi_cost可能为空或字符串，需要转换
+                        taxi_cost = route_data.get('taxi_cost', 0)
+                        try:
+                            taxi_cost = float(taxi_cost) if taxi_cost else 0
+                        except (ValueError, TypeError):
+                            taxi_cost = 0
+                        
+                        if taxi_cost == 0:
+                            # 使用简单公式估算：起步价13 + 2.3元/km
+                            km = route_data['distance'] / 1000
+                            taxi_cost = 13 + km * 2.3
+                        
+                        routes.append({
+                            'from_idx': i,
+                            'to_idx': i + 1,
+                            'from_name': attractions[i]['name'],
+                            'to_name': attractions[i+1]['name'],
+                            'distance': route_data['distance'],  # 真实距离
+                            'duration': route_data['duration'],  # 真实时间
+                            'mode': transport_type,
+                            'cost': taxi_cost,  # 真实/估算出租车费用
+                            'polyline': route_data.get('polyline', ''),
+                            'tolls': route_data.get('tolls', 0),  # 过路费
+                            'traffic_lights': route_data.get('traffic_lights', 0),  # 红绿灯数
+                            'suggestion': self._get_transport_suggestion(
+                                route_data['distance'], 
+                                transport_type,
+                                budget_tight
+                            )
+                        })
+                        print(f"  {attractions[i]['name']} → {attractions[i+1]['name']}: "
+                              f"{route_data['distance']/1000:.1f}km, {transport_type}, ¥{taxi_cost:.1f} [高德API]")
+                    else:
+                        raise Exception("驾车路线API返回空")
+                
+                else:
+                    # 默认使用步行
+                    raise Exception(f"未知交通方式: {transport_type}")
                 
             except Exception as e:
-                print(f"获取路线失败 {attractions[i]['name']} -> {attractions[i+1]['name']}: {e}")
+                print(f"⚠️  获取路线失败 {attractions[i]['name']} -> {attractions[i+1]['name']}: {e}")
+                print(f"  使用备用方案：直线距离估算")
+                
                 # 使用直线距离作为备用
-                mode_display, _ = self._decide_transport_mode(straight_distance, budget_tight)
-                cost = self._estimate_transport_cost(straight_distance, mode_display)
+                estimated_duration = self._estimate_duration(straight_distance, transport_type)
+                estimated_cost = self._estimate_transport_cost(straight_distance, transport_type)
                 
                 routes.append({
                     'from_idx': i,
@@ -293,13 +390,14 @@ class RoutePlanner:
                     'from_name': attractions[i]['name'],
                     'to_name': attractions[i+1]['name'],
                     'distance': straight_distance,
-                    'duration': self._estimate_duration(straight_distance, mode_display),
-                    'mode': mode_display,
-                    'cost': cost,
+                    'duration': estimated_duration,
+                    'mode': transport_type,
+                    'cost': estimated_cost,
                     'polyline': '',
+                    'is_estimated': True,  # 标记为估算数据
                     'suggestion': self._get_transport_suggestion(
                         straight_distance, 
-                        mode_display,
+                        transport_type,
                         budget_tight
                     )
                 })
@@ -309,7 +407,8 @@ class RoutePlanner:
     def _decide_transport_mode(
         self, 
         distance: float, 
-        budget_tight: bool
+        budget_tight: bool,
+        is_intercity: bool = False
     ) -> tuple[str, str]:
         """
         根据距离和预算决定交通方式
@@ -317,10 +416,23 @@ class RoutePlanner:
         Args:
             distance: 距离（米）
             budget_tight: 是否预算紧张
+            is_intercity: 是否跨城市
             
         Returns:
             (API模式, 显示名称) 例如: ('walking', '步行')
         """
+        # 跨城市且距离>50km，推荐高铁
+        if is_intercity and distance > 50000:
+            return ('transit', '高铁')
+        
+        # 跨城市但距离较近（30-50km），可以考虑城际公交或高铁
+        elif is_intercity and distance > 30000:
+            if budget_tight:
+                return ('transit', '城际巴士')
+            else:
+                return ('transit', '高铁/城际')
+        
+        # 同城交通
         if distance < 2000:  # <2km
             return ('walking', '步行')
         
@@ -360,6 +472,12 @@ class RoutePlanner:
         elif mode in ['公交', '地铁', '地铁/公交']:
             # 公共交通：2-5元
             return min(5, max(2, km * 0.5))
+        elif mode == '高铁':
+            # 高铁：约0.4-0.5元/km（二等座）
+            return km * 0.45
+        elif mode in ['高铁/城际', '城际巴士']:
+            # 城际巴士：约0.3元/km
+            return km * 0.3
         elif mode in ['出租车', '出租车/网约车']:
             # 出租车：起步价13元 + 2.3元/km
             return 13 + km * 2.3
@@ -368,7 +486,7 @@ class RoutePlanner:
     
     def _estimate_duration(self, distance: float, mode: str) -> float:
         """
-        估算交通时间
+        估算交通时间（优化精度）
         
         Args:
             distance: 距离（米）
@@ -378,13 +496,23 @@ class RoutePlanner:
             时间（秒）
         """
         if mode == '步行':
-            return distance / 1.2  # 步行速度1.2m/s
+            # 步行速度：4.3 km/h ≈ 1.2 m/s
+            return distance / 1.2
         elif mode in ['公交', '地铁', '地铁/公交']:
-            return distance / 8.3  # 公交平均速度30km/h
-        elif mode in ['出租车', '出租车/网约车']:
-            return distance / 11.1  # 出租车平均速度40km/h
+            # 公交平均速度：30 km/h = 8.33 m/s（考虑等车和换乘时间）
+            return distance / 8.33
+        elif mode == '高铁':
+            # 高铁平均速度：200 km/h = 55.56 m/s（含进出站时间，按150km/h算）
+            return distance / 41.67
+        elif mode in ['高铁/城际', '城际巴士']:
+            # 城际交通平均速度：80 km/h = 22.22 m/s
+            return distance / 22.22
+        elif mode in ['出租车', '出租车/网约车', 'driving']:
+            # 出租车平均速度：40 km/h = 11.11 m/s（市区平均速度）
+            return distance / 11.11
         else:
-            return distance / 5  # 默认
+            # 默认速度：18 km/h ≈ 5 m/s
+            return distance / 5.0
     
     def _get_transport_suggestion(
         self, 
@@ -411,6 +539,14 @@ class RoutePlanner:
         elif mode in ['公交', '地铁', '地铁/公交']:
             alternatives = "如果赶时间可以打车" if not budget_tight else "经济实惠的选择"
             return f"距离{km:.1f}km，建议{mode}，{alternatives}"
+        
+        elif mode == '高铁':
+            time_est = km / 150  # 小时
+            return f"跨城市{km:.1f}km，建议{mode}，约{time_est:.1f}小时，快速舒适"
+        
+        elif mode in ['高铁/城际', '城际巴士']:
+            alternatives = "预算紧张可选城际巴士" if budget_tight else "快速便捷"
+            return f"跨城市{km:.1f}km，建议{mode}，{alternatives}"
         
         elif mode in ['出租车', '出租车/网约车']:
             alternatives = "预算紧张可选地铁/公交" if budget_tight else "快速便捷"
@@ -456,8 +592,8 @@ class RoutePlanner:
             'total_cost': total_cost
         }
     
-    async def _calculate_total_distance(self, attractions: List[Dict]) -> float:
+    async def _calculate_total_distance(self, attractions: List[Dict], city: str = "北京") -> float:
         """计算按原始顺序的总距离"""
-        routes = await self._get_detailed_routes(attractions)
+        routes = await self._get_detailed_routes(attractions, city=city)
         return sum(r['distance'] for r in routes)
 

@@ -25,7 +25,7 @@ class AttractionFilter(BaseModel):
 
 
 class AttractionResponse(BaseModel):
-    """景点响应"""
+    """景点响应（优化版：包含缩略图）"""
     id: str
     name: str
     lng: float
@@ -33,10 +33,11 @@ class AttractionResponse(BaseModel):
     city: Optional[str]
     address: Optional[str]
     type: Optional[str]
-    rating: Optional[float]
-    cost: Optional[str]
-    tel: Optional[str]
-    photos: List[str] = []
+    rating: Optional[float] = None
+    cost: Optional[str] = None
+    tel: Optional[str] = None
+    photos: List[str] = []  # 所有图片URL列表
+    thumbnail: Optional[str] = None  # 缩略图（第一张图片）
     distance: Optional[float] = None  # 距离（米）
     
     class Config:

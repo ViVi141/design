@@ -1251,9 +1251,49 @@ onMounted(() => {
   window.addEventListener('keydown', handleKeyboard)
 })
 
+// 检测IPv6环境并给出友好提示
+async function checkIPv6Environment() {
+  try {
+    const response = await fetch('/api/v1/location/debug')
+    const data = await response.json()
+    
+    const detectedIP = data.detected_ip
+    const isPrivate = data.is_private
+    const isIPv6 = detectedIP && detectedIP.includes(':') && detectedIP.split(':').length >= 2
+    
+    if (isIPv6 || !detectedIP || isPrivate) {
+      ElNotification({
+        title: '💡 自动定位提示',
+        dangerouslyUseHTMLString: true,
+        message: `
+          <div style="line-height: 1.6;">
+            <p><strong>检测到您的网络环境可能无法自动定位：</strong></p>
+            ${isIPv6 ? '<p>• 您使用的是IPv6网络（高德API仅支持IPv4）</p>' : ''}
+            ${isPrivate || !detectedIP ? '<p>• 您处于内网环境（如局域网）</p>' : ''}
+            <p style="margin-top: 8px;"><strong>解决方案：</strong></p>
+            <p>1️⃣ 在左侧"出发地"中手动选择城市</p>
+            <p>2️⃣ 生产环境部署后，IPv4用户可自动定位</p>
+            <p style="color: #909399; font-size: 12px; margin-top: 8px;">
+              提示：这不影响您使用AI规划功能，只需手动选择城市即可
+            </p>
+          </div>
+        `,
+        type: 'info',
+        duration: 8000,
+        position: 'top-right'
+      })
+    }
+  } catch (error) {
+    console.log('[IPv6检测] 跳过检测')
+  }
+}
+
 // 初始化地图
 async function initMap() {
   try {
+    console.log('[AI规划] 初始化地图...')
+    
+    // 加载高德地图
     ;(window as any)._AMapSecurityConfig = {
       securityJsCode: '647d226e39983ddf9a56349328a7e844'
     }
@@ -1275,7 +1315,8 @@ async function initMap() {
         'AMap.ToolBar',
         'AMap.TileLayer',
         'AMap.TileLayer.Satellite',
-        'AMap.TileLayer.RoadNet'
+        'AMap.TileLayer.RoadNet',
+        'AMap.Geolocation'  // 添加高德定位插件
       ]
     })
     
@@ -1285,7 +1326,7 @@ async function initMap() {
     if (mapContainer.value) {
       map.value = new AMap.Map(mapContainer.value, {
         zoom: 11,
-        center: [116.397428, 39.90923],
+        center: [116.397428, 39.90923],  // 默认北京
         mapStyle: 'amap://styles/normal',
         viewMode: '2D',
         resizeEnable: true,
@@ -1297,6 +1338,24 @@ async function initMap() {
       map.value.addControl(new AMap.ToolBar({
         position: 'RB'
       }))
+      
+      // 使用高德官方Geolocation插件（最快最准确）
+      const geolocation = new AMap.Geolocation({
+        enableHighAccuracy: false,
+        timeout: 10000,
+        useNative: true,  // 优先使用浏览器定位
+        convert: true,  // 自动转换为高德坐标
+        showButton: false,
+        showMarker: false,
+        showCircle: false,
+        panToLocation: true,  // 定位成功后自动移动
+        zoomToAccuracy: false
+      })
+      
+      map.value.addControl(geolocation)
+      
+      // 检测IPv6环境并提示
+      checkIPv6Environment()
     }
   } catch (error) {
     console.error('地图加载失败:', error)
@@ -1884,17 +1943,19 @@ async function sendMessage() {
   scrollToBottom()
 
   generating.value = true
+  thinkingCollapsed = false  // 重置折叠状态
+  chunk_received = 0  // 重置chunk计数器
 
   const progressIndex = messages.value.length
   messages.value.push({
     role: 'assistant',
-    content: '🤔 正在分析...'
+    content: '<div class="ai-thinking">🤔 正在分析...</div>'
   })
 
   try {
     console.log('发送请求到流式API...')
     
-    const response = await fetch('/api/v1/agent/chat/stream', {
+    const response = await fetch('/api/v1/agent/enhanced-stream', {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
@@ -1923,35 +1984,59 @@ async function sendMessage() {
 
     if (reader) {
       console.log('开始读取流式数据...')
+      let chunkCount = 0
       while (true) {
         const { done, value } = await reader.read()
         if (done) {
-          console.log('流式数据读取完成')
+          console.log(`流式数据读取完成，共收到 ${chunkCount} 个数据块`)
           break
         }
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n\n')
+        chunkCount++
+        const decoded = decoder.decode(value, { stream: true })
+        buffer += decoded
+        
+        // 按行分割（SSE标准是\n分隔）
+        const lines = buffer.split('\n')
+        // 保留最后一个不完整的行
         buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          if (!line.trim()) continue  // 跳过空行
+          if (line.startsWith(':')) continue  // 跳过注释（心跳包）
+          
+          // 处理 "data: " 开头的行
+          if (line.startsWith('data:')) {
             try {
-              const jsonStr = line.substring(6).trim()
-              console.log('收到事件:', jsonStr.substring(0, 100))
-              const event = JSON.parse(jsonStr)
-              handleStreamEvent(event, progressIndex)
+              // 移除 "data: " 前缀（可能有多个）
+              let jsonStr = line
+              while (jsonStr.startsWith('data:')) {
+                jsonStr = jsonStr.substring(5).trim()
+              }
+              
+              if (jsonStr) {
+                const event = JSON.parse(jsonStr)
+                console.log(`[SSE #${chunkCount}] ${event.type}:`, event.content?.substring(0, 50))
+                handleStreamEvent(event, progressIndex)
+              }
             } catch (e) {
-              console.error('解析事件失败:', line, e)
+              // JSON解析失败，可能是分段的，忽略
             }
           }
         }
       }
     }
 
-    // 清理stream标记
+    // 清理stream标记并关闭main-content
     if (messages.value[progressIndex]) {
-      messages.value[progressIndex].content = messages.value[progressIndex].content.replace(/<!-- STREAM_CONTENT -->/g, '')
+      let content = messages.value[progressIndex].content
+      content = content.replace(/<!-- STREAM -->/g, '')
+      content = content.replace(/<!-- LLM_STREAM -->/g, '')
+      // 如果有main-content，关闭它
+      if (content.includes('<div class="main-content">')) {
+        content += '</div>'
+      }
+      messages.value[progressIndex].content = content
     }
 
     if (itinerary.value) {
@@ -1982,49 +2067,166 @@ async function sendMessage() {
   }
 }
 
-// 处理流式事件（优化：批量更新DOM）
-let _pendingDOMUpdates: any[] = []
-let _domUpdateTimer: any = null
+// 处理流式事件
+let thinkingCollapsed = false  // 标记思考内容是否已折叠
+let chunk_received = 0  // 累计接收的chunk数量
 
 function handleStreamEvent(event: any, progressIndex: number) {
+  console.log('[事件处理] 类型:', event.type, '内容:', event.content?.substring(0, 50))
+  
+  if (!messages.value[progressIndex]) {
+    console.warn('[事件处理] 消息索引无效:', progressIndex)
+    return
+  }
+  
   switch (event.type) {
+    case 'start':
+      // Agent开始
+      console.log('[事件处理] Agent启动')
+      messages.value[progressIndex].content += `<div class="agent-start">🤖 ${event.content}</div>`
+      scrollToBottom()
+      break
+    
     case 'thinking':
-      // AI思考过程 - 批量更新DOM
-      if (messages.value[progressIndex]) {
-        _pendingDOMUpdates.push(() => {
-          messages.value[progressIndex].content += `<div class="thinking-item">💭 ${event.content}</div>`
-        })
-        scheduleDOMUpdate()
+      // AI思考过程
+      console.log('[事件处理] 添加thinking:', event.content)
+      messages.value[progressIndex].content += `<div class="thinking-item">💭 ${event.content}</div>`
+      scrollToBottom()
+      break
+      
+    case 'tool_start':
+      // 工具调用开始（显示详细的输入参数）
+      console.log('[事件处理] 工具调用开始:', event.tool, event.input)
+      let toolStartHtml = `<div class="tool-call">
+        <div class="tool-call-header">🔧 调用工具：<strong>${event.tool}</strong></div>`
+      
+      // 如果有输入参数，显示JSON
+      if (event.input && Object.keys(event.input).length > 0) {
+        toolStartHtml += `<pre class="tool-input">${JSON.stringify(event.input, null, 2)}</pre>`
+      }
+      
+      toolStartHtml += `</div>`
+      messages.value[progressIndex].content += toolStartHtml
+      scrollToBottom()
+      break
+      
+    case 'tool_end':
+      // 工具调用完成（显示详细的输出结果）
+      console.log('[事件处理] 工具调用完成:', event.tool, event.output)
+      let toolEndHtml = `<div class="tool-result">
+        <div class="tool-result-header">✅ ${event.tool} 完成</div>`
+      
+      // 如果有输出结果，显示（限制长度）
+      if (event.output) {
+        const outputText = typeof event.output === 'string' ? event.output : JSON.stringify(event.output, null, 2)
+        const displayOutput = outputText.length > 500 ? outputText.substring(0, 500) + '...' : outputText
+        toolEndHtml += `<pre class="tool-output">${displayOutput}</pre>`
+      }
+      
+      toolEndHtml += `</div>`
+      messages.value[progressIndex].content += toolEndHtml
+      scrollToBottom()
+      break
+      
+    case 'llm_stream':
+      // Agent的LLM流式回复
+      console.log('[事件处理] LLM流式输出')
+      let llmContent = messages.value[progressIndex].content
+      const llmStreamMarker = '<!-- LLM_STREAM -->'
+      
+      // 第一次收到时，折叠思考和工具调用内容
+      if (!thinkingCollapsed && !llmContent.includes(llmStreamMarker)) {
+        console.log('[事件处理] 折叠工具调用记录')
+        llmContent = `<details class="thinking-collapsed">
+          <summary>💭 查看AI思考和工具调用过程（点击展开）</summary>
+          ${llmContent}
+        </details>
+        <div class="main-content">`
+        thinkingCollapsed = true
+      }
+      
+      if (llmContent.includes(llmStreamMarker)) {
+        llmContent = llmContent.replace(llmStreamMarker, event.content + llmStreamMarker)
+      } else {
+        llmContent += `<div class="ai-reply">${event.content}${llmStreamMarker}</div>`
+      }
+      
+      messages.value[progressIndex].content = llmContent
+      chunk_received++
+      if (chunk_received % 5 === 0) {
+        scrollToBottom()
       }
       break
       
     case 'deepseek':
-      // DeepSeek深度推理过程 - 批量更新
-      if (messages.value[progressIndex]) {
-        _pendingDOMUpdates.push(() => {
-          messages.value[progressIndex].content += `<div class="deepseek-item">🧠 ${event.content}</div>`
-        })
-        scheduleDOMUpdate()
-      }
+      // DeepSeek深度推理过程（旧版兼容）
+      console.log('[事件处理] 添加deepseek:', event.content)
+      messages.value[progressIndex].content += `<div class="deepseek-item">🧠 ${event.content}</div>`
+      scrollToBottom()
       break
       
     case 'deepseek_stream':
-      // DeepSeek实时流式输出 - 批量累积
-      if (messages.value[progressIndex]) {
-        _pendingDOMUpdates.push(() => {
-          let content = messages.value[progressIndex].content
-          const streamMarker = '<!-- STREAM_CONTENT -->'
-          
-          if (content.includes(streamMarker)) {
-            content = content.replace(streamMarker, event.content + streamMarker)
-          } else {
-            content += `<div class="deepseek-stream">💬 ${event.content}${streamMarker}</div>`
-          }
-          
-          messages.value[progressIndex].content = content
-        })
-        scheduleDOMUpdate()
+      // DeepSeek实时流式输出 - 第一次收到时折叠思考内容（旧版兼容）
+      console.log('[事件处理] 添加deepseek_stream')
+      let deepseekStreamContent = messages.value[progressIndex].content
+      const deepseekMarker = '<!-- STREAM -->'
+      
+      // 第一次收到正文输出时，折叠思考内容
+      if (!thinkingCollapsed && !deepseekStreamContent.includes(deepseekMarker)) {
+        console.log('[事件处理] 折叠思考内容')
+        // 将所有现有内容包装到折叠区域
+        deepseekStreamContent = `<details class="thinking-collapsed">
+          <summary>💭 查看AI思考过程（点击展开）</summary>
+          ${deepseekStreamContent}
+        </details>
+        <div class="main-content">`
+        thinkingCollapsed = true
       }
+      
+      if (deepseekStreamContent.includes(deepseekMarker)) {
+        // 替换为最新内容（覆盖而不是追加）
+        const regex = /<pre[^>]*>[\s\S]*?<!-- STREAM -->/
+        deepseekStreamContent = deepseekStreamContent.replace(regex, `<pre style="white-space: pre-wrap; font-family: monospace; font-size: 11px; color: #666; line-height: 1.4; max-height: 400px; overflow-y: auto;">${event.content}${deepseekMarker}`)
+      } else {
+        // 创建新的流式内容区域
+        deepseekStreamContent += `<div class="deepseek-stream">📝 正在生成行程...<pre style="white-space: pre-wrap; font-family: monospace; font-size: 11px; color: #666; line-height: 1.4; max-height: 400px; overflow-y: auto;">${event.content}${deepseekMarker}</pre></div>`
+      }
+      
+      messages.value[progressIndex].content = deepseekStreamContent
+      chunk_received++
+      // 减少滚动频率
+      if (chunk_received % 10 === 0) {
+        scrollToBottom()
+      }
+      break
+    
+    case 'complete':
+      // Agent完成（带最终回复）
+      console.log('[事件处理] Agent完成')
+      if (event.reply) {
+        // 如果有完整回复，替换内容
+        let completeContent = messages.value[progressIndex].content
+        if (completeContent.includes('<div class="main-content">')) {
+          completeContent += `<div class="final-reply">${event.reply}</div></div>`
+        } else {
+          completeContent += `<div class="final-reply">${event.reply}</div>`
+        }
+        messages.value[progressIndex].content = completeContent
+      }
+      scrollToBottom()
+      break
+    
+    case 'done':
+      // Agent完成信号
+      console.log('[事件处理] Agent完成信号')
+      scrollToBottom()
+      break
+      
+    case 'error':
+      // 错误处理
+      console.error('[事件处理] Agent错误:', event.content)
+      messages.value[progressIndex].content += `<div class="error-msg">❌ ${event.content}</div>`
+      scrollToBottom()
       break
       
     case 'progress_detail':
@@ -3829,6 +4031,8 @@ function resetTrainForm() {
   flex-direction: column;
   min-width: 280px;
   max-width: 350px;
+  height: calc(100vh - 60px);  /* 固定高度 */
+  overflow: hidden;  /* 防止溢出 */
 }
 
 .sidebar-header {
@@ -3909,6 +4113,7 @@ function resetTrainForm() {
   overflow-y: auto;
   padding: 12px 16px;
   scroll-behavior: smooth;
+  max-height: calc(100vh - 60px - 50px - 40px - 80px);  /* 减去header、偏好设置、输入框的高度 */
 }
 
 .message {
@@ -3932,6 +4137,8 @@ function resetTrainForm() {
   background: #f4f4f5;
   margin-right: 30px;
   max-width: calc(100% - 30px);
+  width: 100%;  /* 占满可用空间，防止宽度抖动 */
+  box-sizing: border-box;
 }
 
 .message-content {
@@ -3941,6 +4148,15 @@ function resetTrainForm() {
   line-height: 1.6;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  min-width: 200px;  /* 最小宽度 */
+  width: fit-content;  /* 自适应内容 */
+}
+
+.message-content pre {
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-x: hidden !important;
+  max-width: 100% !important;
 }
 
 .message-content :deep(.success-msg) {
@@ -3985,17 +4201,78 @@ function resetTrainForm() {
   50% { opacity: 0.85; }
 }
 
+/* 折叠的思考内容 */
+.message-content :deep(.thinking-collapsed) {
+  margin: 8px 0 16px 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  overflow: hidden;
+}
+
+.message-content :deep(.thinking-collapsed summary) {
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: #4b5563;
+  font-weight: 500;
+  list-style: none;
+  transition: all 0.2s;
+}
+
+.message-content :deep(.thinking-collapsed summary)::-webkit-details-marker {
+  display: none;
+}
+
+.message-content :deep(.thinking-collapsed summary)::before {
+  content: '▶';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+
+.message-content :deep(.thinking-collapsed[open] summary)::before {
+  transform: rotate(90deg);
+}
+
+.message-content :deep(.thinking-collapsed summary):hover {
+  background: #f3f4f6;
+}
+
+.message-content :deep(.thinking-collapsed[open] summary) {
+  border-bottom: 1px solid #e5e7eb;
+  background: #f3f4f6;
+}
+
+.message-content :deep(.main-content) {
+  margin-top: 4px;
+}
+
 .message-content :deep(.deepseek-stream) {
-  font-size: 12px;
-  color: #10b981;
-  padding: 8px 12px;
-  margin: 4px 0;
-  background: linear-gradient(90deg, #ecfdf5 0%, #fafafa 100%);
-  border-left: 3px solid #10b981;
+  padding: 12px;
+  margin: 8px 0;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  width: 100%;  /* 固定宽度，不随内容变化 */
+  box-sizing: border-box;
+}
+
+.message-content :deep(.deepseek-stream pre) {
+  margin: 8px 0 0 0;
+  padding: 8px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
   border-radius: 4px;
-  font-family: 'Consolas', 'Monaco', monospace;
+  max-height: 300px;
+  overflow-y: auto;
+  overflow-x: hidden;
   white-space: pre-wrap;
-  line-height: 1.6;
+  word-break: break-all;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .message-content :deep(.progress-detail) {
@@ -4030,12 +4307,100 @@ function resetTrainForm() {
   border-radius: 4px;
 }
 
+/* Agent启动 */
+.message-content :deep(.agent-start) {
+  font-size: 13px;
+  color: #6366f1;
+  padding: 10px 14px;
+  margin: 8px 0;
+  background: linear-gradient(90deg, #eef2ff 0%, #fafafa 100%);
+  border-left: 4px solid #6366f1;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+/* 工具调用开始 */
+.message-content :deep(.tool-call) {
+  font-size: 12px;
+  color: #f59e0b;
+  padding: 10px 14px;
+  margin: 8px 0;
+  background: #fffbeb;
+  border-left: 3px solid #f59e0b;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.message-content :deep(.tool-call-header) {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.message-content :deep(.tool-input) {
+  background: #fef3c7;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  color: #92400e;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 工具调用完成 */
 .message-content :deep(.tool-result) {
   font-size: 11px;
-  color: #67c23a;
-  padding: 4px 10px;
-  margin: 2px 0;
+  color: #10b981;
+  padding: 10px 14px;
+  margin: 8px 0;
+  background: #ecfdf5;
+  border-left: 3px solid #10b981;
+  border-radius: 6px;
+}
+
+.message-content :deep(.tool-result-header) {
+  margin-bottom: 8px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.message-content :deep(.tool-output) {
+  background: #d1fae5;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 11px;
   font-family: 'Courier New', monospace;
+  color: #065f46;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* AI最终回复 */
+.message-content :deep(.ai-reply) {
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.8;
+  margin: 12px 0;
+  padding: 12px;
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+/* 最终回复 */
+.message-content :deep(.final-reply) {
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.8;
+  margin: 12px 0;
+  padding: 14px;
+  background: #f0fdf4;
+  border-radius: 8px;
+  border-left: 4px solid #10b981;
 }
 
 .chat-input {
@@ -4065,6 +4430,8 @@ function resetTrainForm() {
   padding: 20px;
   overflow-y: auto;
   background: #fafafa;
+  height: calc(100vh - 60px);  /* 固定高度 */
+  max-height: calc(100vh - 60px);  /* 最大高度 */
 }
 
 .content-header {
@@ -4632,6 +4999,8 @@ function resetTrainForm() {
   flex-direction: column;
   position: relative;
   min-width: 450px;
+  height: calc(100vh - 60px);  /* 固定高度，与页面同高 */
+  overflow: hidden;  /* 防止溢出 */
 }
 
 .map-header {
@@ -4652,6 +5021,8 @@ function resetTrainForm() {
 .map-container {
   flex: 1;
   position: relative;
+  min-height: 0;  /* 重要：允许flex子元素收缩 */
+  height: 100%;  /* 占满父容器 */
 }
 
 /* 地图统计浮层 */

@@ -105,18 +105,20 @@ async def generate_stream_response(request: StreamChatRequest):
                 accumulated_content += chunk
                 
                 # 检测是否开始输出JSON
-                if '{' in chunk and not json_started:
+                if '```json' in chunk and not json_started:
                     json_started = True
                     yield f"data: {json.dumps({'type': 'deepseek', 'content': '→ 开始生成JSON结构...'}, ensure_ascii=False)}\n\n"
                 
-                # 如果不是JSON部分，作为思考过程输出
-                if not json_started and chunk.strip():
+                # 实时显示所有chunk（每5个chunk发送一次，提升流式体验）
+                if chunk.strip():
                     # 过滤掉markdown标记
-                    clean_chunk = chunk.replace('```', '').replace('json', '').strip()
-                    if clean_chunk and len(clean_chunk) > 3:
-                        print(f"[主流程] 发送deepseek_stream: {clean_chunk[:50]}...")
-                        yield f"data: {json.dumps({'type': 'deepseek_stream', 'content': clean_chunk}, ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.05)  # 减少发送频率
+                    clean_chunk = chunk.replace('```json', '').replace('```', '').strip()
+                    if clean_chunk:
+                        # 每5个chunk发送一次到前端（更流畅）
+                        if chunk_received % 5 == 0:
+                            # 发送最近累积的内容（最后300字符）
+                            recent_content = accumulated_content[-300:] if len(accumulated_content) > 300 else accumulated_content
+                            yield f"data: {json.dumps({'type': 'deepseek_stream', 'content': recent_content}, ensure_ascii=False)}\n\n"
             
             # 解析完整的响应
             yield f"data: {json.dumps({'type': 'status', 'content': '📝 解析DeepSeek响应...'}, ensure_ascii=False)}\n\n"
@@ -253,75 +255,44 @@ async def generate_stream_response(request: StreamChatRequest):
         
         # 如果有无效景点，需要补全
         if invalid_count > 0:
-            yield f"data: {json.dumps({'type': 'thinking', 'content': f'决策：需要补充{invalid_count}个{request.destination}的景点'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'status', 'content': f'🔄 自动补全景点中...'}, ensure_ascii=False)}\n\n"
-            
-            # 移除无效景点并补充
-            for day_idx, day in enumerate(itinerary.daily_schedule):
-                attractions_to_replace = []
-                for attr in day.attractions:
-                    if not attr.address or request.destination not in attr.address:
-                        attractions_to_replace.append(attr)
-                
-                if attractions_to_replace:
-                    # 从该天移除无效景点
-                    for attr in attractions_to_replace:
-                        day.attractions.remove(attr)
-                    
-                    # 搜索该区域的热门景点补充
-                    try:
-                        replacement_results = await map_service.search_attractions(
-                            city=request.destination,
-                            keyword="景点",  # 搜索通用景点
-                            limit=len(attractions_to_replace) + 2
-                        )
-                        
-                        added = 0
-                        for poi in replacement_results:
-                            if added >= len(attractions_to_replace):
-                                break
-                            
-                            # 检查是否已在行程中
-                            poi_name = poi.get('name', '')
-                            if not any(a.name == poi_name for a in day.attractions):
-                                # 添加新景点
-                                from app.services.enhanced_ai_service import AttractionSchedule
-                                new_attr = AttractionSchedule(
-                                    name=poi_name,
-                                    start_time=attractions_to_replace[added].start_time if added < len(attractions_to_replace) else "14:00",
-                                    duration_hours=2.0,
-                                    cost=0,
-                                    tips=f"系统推荐的{request.destination}景点",
-                                    address=poi.get('address', ''),
-                                    lng=poi.get('lng', 0),
-                                    lat=poi.get('lat', 0),
-                                    type=poi.get('type', '')
-                                )
-                                day.attractions.append(new_attr)
-                                added += 1
-                                
-                                yield f"data: {json.dumps({'type': 'status', 'content': f'✓ 已补充：{poi_name}'}, ensure_ascii=False)}\n\n"
-                        
-                    except Exception as e:
-                        print(f"补充景点失败: {e}")
-            
-            yield f"data: {json.dumps({'type': 'status', 'content': '✅ 景点补全完成'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'thinking', 'content': f'决策：保留AI推荐的景点，让用户在前端调整'}, ensure_ascii=False)}\n\n"
         
         # 6. 并行获取天气和优化路线（提速）
         yield f"data: {json.dumps({'type': 'thinking', 'content': '思考：景点信息已获取，开始并行处理：获取天气 + 优化路线'}, ensure_ascii=False)}\n\n"
         yield f"data: {json.dumps({'type': 'status', 'content': '⚡ 并行处理：获取天气 + TSP优化...'}, ensure_ascii=False)}\n\n"
         
         try:
-            weather_info = await map_service.get_weather(request.destination)
-            if weather_info:
-                yield f"data: {json.dumps({'type': 'weather', 'data': weather_info}, ensure_ascii=False)}\n\n"
-                forecasts_count = len(weather_info.get('forecasts', []))
-                status_msg = f'✅ 已获取{forecasts_count}天天气预报'
+            # 并行获取所有城市的天气（最多3个）
+            weather_cities = destinations[:3] if destinations else [request.destination]
+            print(f"[天气] 并行查询城市: {weather_cities}")
+            
+            # 并行调用（提升速度）
+            weather_tasks = [map_service.get_weather(city) for city in weather_cities]
+            weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+            
+            all_weather = {}
+            for city, weather_info in zip(weather_cities, weather_results):
+                if weather_info and not isinstance(weather_info, Exception):
+                    all_weather[city] = weather_info
+                elif isinstance(weather_info, Exception):
+                    print(f"[天气] {city}查询异常: {weather_info}")
+            
+            if all_weather:
+                # 显示所有城市的天气
+                for city, weather in all_weather.items():
+                    yield f"data: {json.dumps({'type': 'weather', 'city': city, 'data': weather}, ensure_ascii=False)}\n\n"
+                
+                forecasts_count = len(list(all_weather.values())[0].get('forecasts', []))
+                cities_str = "、".join(all_weather.keys())
+                status_msg = f'✅ 已获取{cities_str}未来{forecasts_count}天天气'
                 yield f"data: {json.dumps({'type': 'status', 'content': status_msg}, ensure_ascii=False)}\n\n"
             else:
+                print(f"[天气] 所有城市都未返回数据")
                 yield f"data: {json.dumps({'type': 'thinking', 'content': '天气信息获取失败，继续规划'}, ensure_ascii=False)}\n\n"
         except Exception as e:
-            print(f"获取天气失败: {e}")
+            print(f"[天气] 获取失败: {e}")
+            import traceback
+            traceback.print_exc()
             yield f"data: {json.dumps({'type': 'thinking', 'content': '天气信息暂时无法获取'}, ensure_ascii=False)}\n\n"
         
         

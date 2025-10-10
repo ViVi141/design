@@ -13,8 +13,6 @@ class MapService:
         # Web服务API Key（用于后端REST API调用）
         self.api_key = "REDACTED_API_KEYf"
         self.base_url = "https://restapi.amap.com/v3"
-        # POI查询缓存（减少重复查询）
-        self._poi_cache = {}
     
     async def search_attractions_v5(
         self, 
@@ -27,7 +25,7 @@ class MapService:
         show_fields: str = "business,photos,navi"
     ) -> List[Dict]:
         """
-        搜索景点（使用v5 POI搜索2.0，带缓存）
+        搜索景点（使用v5 POI搜索2.0）
         
         Args:
             keywords: 搜索关键词
@@ -41,12 +39,6 @@ class MapService:
         Returns:
             景点列表
         """
-        # 检查缓存
-        cache_key = f"v5_{region}_{keywords}_{types}_{page_size}"
-        if cache_key in self._poi_cache:
-            print(f"[POI缓存v5] 命中: {keywords}")
-            return self._poi_cache[cache_key]
-        
         url = "https://restapi.amap.com/v5/place/text"
         
         params = {
@@ -70,105 +62,145 @@ class MapService:
             response = await client.get(url, params=params)
             data = response.json()
         
+        # 简化日志（仅在出错时打印详细信息）
+        if data.get('status') != '1':
+            print(f"[POI搜索v5] 错误 - 状态: {data.get('status')}, 信息: {data.get('info')}")
+            print(f"[POI搜索v5] 请求参数: {params}")
+        
         if data['status'] == '1':
             pois = data.get('pois', [])
             
             # 格式化景点数据
             attractions = []
             for poi in pois:
-                location = poi['location'].split(',')
-                
-                # 提取评分和价格
-                biz_ext = poi.get('biz_ext', {})
-                rating = 0.0
-                cost = "未知"
-                
-                if isinstance(biz_ext, dict):
-                    # rating可能是字符串或数字
-                    rating_value = biz_ext.get('rating', 0)
-                    if rating_value and str(rating_value).strip():
-                        try:
-                            rating = float(rating_value)
-                        except:
-                            rating = 0.0
+                try:
+                    location = poi['location'].split(',')
                     
-                    # cost可能是字符串、数字或数组
-                    cost_value = biz_ext.get('cost', '未知')
-                    if isinstance(cost_value, list):
-                        cost = '未知' if not cost_value else str(cost_value[0])
-                    else:
-                        cost = str(cost_value) if cost_value else '未知'
-                
-                # 处理photos - 提取URL
-                photos_data = poi.get('photos', [])
-                photos = []
-                if isinstance(photos_data, list):
-                    for photo in photos_data:
-                        if isinstance(photo, dict):
-                            url = photo.get('url', '')
-                            if url:
-                                photos.append(url)
-                        elif isinstance(photo, str):
-                            photos.append(photo)
-                
-                # 处理tel - 可能是字符串或数组
-                tel_value = poi.get('tel', '')
-                if isinstance(tel_value, list):
-                    tel = tel_value[0] if tel_value else ''
-                else:
-                    tel = str(tel_value) if tel_value else ''
-                
-                attractions.append({
-                    'id': poi['id'],
-                    'name': poi['name'],
-                    'lng': float(location[0]),
-                    'lat': float(location[1]),
-                    'type': poi.get('type', ''),
-                    'typecode': poi.get('typecode', ''),
-                    'address': poi.get('address', ''),
-                    'city': city,
-                    'rating': rating,
-                    'cost': cost,
-                    'tel': tel,
-                    'photos': photos
-                })
-            
-            # 缓存结果（限制缓存大小）
-            if len(self._poi_cache) < 1000:  # 最多缓存1000个
-                self._poi_cache[cache_key] = attractions
+                    # 提取评分和价格（v5 API在business对象下）
+                    business = poi.get('business', {})
+                    rating = 0.0
+                    cost = "未知"
+                    tel = ''
+                    
+                    if isinstance(business, dict):
+                        # 提取rating（餐饮、酒店、景点、影院类POI）
+                        rating_value = business.get('rating', '')
+                        if rating_value and str(rating_value).strip():
+                            try:
+                                rating = float(rating_value)
+                            except:
+                                rating = 0.0
+                        
+                        # 提取cost人均消费（餐饮、酒店、景点、影院类POI）
+                        cost_value = business.get('cost', '')
+                        if cost_value and str(cost_value).strip():
+                            cost = str(cost_value)
+                        
+                        # 提取电话
+                        tel_value = business.get('tel', '')
+                        if isinstance(tel_value, list):
+                            tel = tel_value[0] if tel_value else ''
+                        else:
+                            tel = str(tel_value) if tel_value else ''
+                    
+                    # 处理photos - 提取URL
+                    photos_data = poi.get('photos', [])
+                    photos = []
+                    if isinstance(photos_data, list):
+                        for photo in photos_data:
+                            if isinstance(photo, dict):
+                                url = photo.get('url', '')
+                                if url:
+                                    photos.append(url)
+                            elif isinstance(photo, str):
+                                photos.append(photo)
+                    
+                    # 获取第一张图片作为缩略图
+                    thumbnail = photos[0] if photos else ''
+                    
+                    attractions.append({
+                        'id': poi['id'],
+                        'name': poi['name'],
+                        'lng': float(location[0]),
+                        'lat': float(location[1]),
+                        'type': poi.get('type', ''),
+                        'typecode': poi.get('typecode', ''),
+                        'address': poi.get('address', ''),
+                        'city': poi.get('city', region) if poi.get('city') else region,
+                        'rating': rating,
+                        'cost': cost,
+                        'tel': tel,
+                        'photos': photos,  # 所有图片
+                        'thumbnail': thumbnail  # 缩略图（第一张）
+                    })
+                except Exception as e:
+                    # 单个POI数据异常，跳过，不影响其他POI
+                    print(f"[POI解析] 跳过异常POI: {poi.get('name', 'unknown')}, 错误: {e}")
+                    continue
             
             return attractions
         else:
             raise Exception(f"高德API错误: {data.get('info')}")
     
+    # 省级到省会的映射
+    PROVINCE_CAPITAL_MAP = {
+        '北京': '北京', '上海': '上海', '天津': '天津', '重庆': '重庆',
+        '河北': '石家庄', '山西': '太原', '辽宁': '沈阳', '吉林': '长春', '黑龙江': '哈尔滨',
+        '江苏': '南京', '浙江': '杭州', '安徽': '合肥', '福建': '福州', '江西': '南昌',
+        '山东': '济南', '河南': '郑州', '湖北': '武汉', '湖南': '长沙', '广东': '广州',
+        '海南': '海口', '四川': '成都', '贵州': '贵阳', '云南': '昆明', '陕西': '西安',
+        '甘肃': '兰州', '青海': '西宁', '台湾': '台北', '内蒙古': '呼和浩特',
+        '广西': '南宁', '西藏': '拉萨', '宁夏': '银川', '新疆': '乌鲁木齐', '香港': '香港',
+        '澳门': '澳门'
+    }
+    
     async def get_weather(self, city: str) -> Optional[Dict]:
-        """获取城市天气预报（未来7天）"""
+        """
+        获取城市天气预报（未来7天）
+        支持：城市名、省级名（自动转换为省会）
+        """
         try:
+            # 如果是省级名称，转换为省会
+            if city in self.PROVINCE_CAPITAL_MAP:
+                capital = self.PROVINCE_CAPITAL_MAP[city]
+                print(f"[天气API] 省级转换：{city} → {capital}")
+                city = capital
+            
+            print(f"[天气API] 开始查询：{city}")
+            
             # 1. 获取城市adcode
             district_url = f"{self.base_url}/config/district"
             async with httpx.AsyncClient(timeout=10.0) as client:
+                print(f"[天气API] 步骤1：获取城市adcode")
                 response = await client.get(district_url, params={
                     'key': self.api_key,
                     'keywords': city,
                     'subdistrict': 0
                 })
                 data = response.json()
+                print(f"[天气API] 行政区查询响应: status={data.get('status')}, districts数量={len(data.get('districts', []))}")
                 
                 if data.get('status') != '1' or not data.get('districts'):
+                    print(f"[天气API] 未找到城市：{city}")
                     return None
                 
                 adcode = data['districts'][0]['adcode']
+                city_name = data['districts'][0]['name']
+                print(f"[天气API] 城市adcode: {adcode}, 名称: {city_name}")
                 
                 # 2. 获取天气信息
                 weather_url = f"{self.base_url}/weather/weatherInfo"
+                print(f"[天气API] 步骤2：获取天气预报")
                 response = await client.get(weather_url, params={
                     'key': self.api_key,
                     'city': adcode,
                     'extensions': 'all'
                 })
                 weather_data = response.json()
+                print(f"[天气API] 天气查询响应: status={weather_data.get('status')}, info={weather_data.get('info')}")
                 
                 if weather_data.get('status') != '1':
+                    print(f"[天气API] 天气查询失败：{weather_data.get('info')}")
                     return None
                 
                 forecasts = weather_data.get('forecasts', [])
@@ -569,6 +601,9 @@ class MapService:
             if photos_data:
                 photos = [p.get('url', '') for p in photos_data if p.get('url')]
             
+            # 缩略图（第一张图片）
+            thumbnail = photos[0] if photos else ''
+            
             # 导航信息
             navi = poi.get('navi', {})
             
@@ -590,7 +625,8 @@ class MapService:
                 'cost': cost,
                 'tel': tel,
                 'opentime': opentime,
-                'photos': photos,
+                'photos': photos,  # 所有图片列表
+                'thumbnail': thumbnail,  # 缩略图（第一张）
                 'business_area': business_area,
                 'navi_poiid': navi.get('navi_poiid', ''),
                 'entr_location': navi.get('entr_location', ''),
@@ -662,4 +698,91 @@ class MapService:
         distance = R * c
         
         return distance
+    
+    async def get_location_by_ip(self, ip: str = None) -> Optional[Dict]:
+        """
+        IP定位：根据IP地址获取地理位置
+        
+        重要：如果不传ip参数，高德API会自动使用HTTP请求的来源IP（服务器出口IP）
+        这对于本地开发或内网环境特别有用
+        
+        Args:
+            ip: IP地址（可选）
+                - 如果填写：使用指定IP定位
+                - 如果不填：高德API自动使用请求来源IP（推荐）
+            
+        Returns:
+            {
+                'province': '省份',
+                'city': '城市',
+                'adcode': '区域编码',
+                'rectangle': '矩形区域',
+                'location': (lng, lat)  # 城市中心坐标
+            }
+        """
+        url = f"{self.base_url}/ip"
+        
+        params = {
+            'key': self.api_key,
+            'output': 'json'
+        }
+        
+        # 只有当ip不是内网IP时才传递
+        if ip:
+            # 检查是否为内网IP
+            from app.core.ip_utils import is_private_ip
+            if is_private_ip(ip):
+                print(f"[IP定位] 检测到内网IP {ip}，不传递给高德API，让其自动识别")
+                # 不设置ip参数，让高德API自动识别
+            else:
+                params['ip'] = ip
+                print(f"[IP定位] 使用指定公网IP: {ip}")
+        
+        try:
+            print(f"[IP定位] 调用高德API: {url}")
+            print(f"[IP定位] 参数: {params}")
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                data = response.json()
+            
+            print(f"[IP定位] 响应状态: {data.get('status')}")
+            print(f"[IP定位] 响应数据: {data}")
+            
+            if data.get('status') == '1':
+                province = data.get('province', '')
+                city = data.get('city', '')
+                adcode = data.get('adcode', '')
+                rectangle = data.get('rectangle', '')
+                
+                # 解析矩形区域，计算中心点
+                location = None
+                if rectangle:
+                    # rectangle格式: "lng1,lat1;lng2,lat2"
+                    try:
+                        coords = rectangle.split(';')
+                        if len(coords) == 2:
+                            p1 = coords[0].split(',')
+                            p2 = coords[1].split(',')
+                            # 计算中心点
+                            center_lng = (float(p1[0]) + float(p2[0])) / 2
+                            center_lat = (float(p1[1]) + float(p2[1])) / 2
+                            location = (center_lng, center_lat)
+                    except:
+                        pass
+                
+                return {
+                    'province': province,
+                    'city': city if city else province,  # 直辖市情况
+                    'adcode': adcode,
+                    'rectangle': rectangle,
+                    'location': location,
+                    'ip': ip if ip else '客户端IP'
+                }
+            else:
+                print(f"[IP定位] 错误: {data.get('info')}")
+                return None
+        except Exception as e:
+            print(f"[IP定位] 异常: {e}")
+            return None
 

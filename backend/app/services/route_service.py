@@ -257,12 +257,25 @@ class RouteService:
                                     'via_num': line.get('via_num', 0)
                                 })
                     
+                    # 安全转换（处理空字符串）
+                    def safe_int(value, default=0):
+                        try:
+                            return int(value) if value and str(value).strip() else default
+                        except (ValueError, TypeError):
+                            return default
+                    
+                    def safe_float(value, default=0.0):
+                        try:
+                            return float(value) if value and str(value).strip() else default
+                        except (ValueError, TypeError):
+                            return default
+                    
                     plans.append({
-                        'distance': int(transit.get('distance', 0)),
-                        'duration': int(cost.get('duration', 0)),
-                        'transit_fee': float(cost.get('transit_fee', 0)),
-                        'taxi_fee': float(cost.get('taxi_fee', 0)),
-                        'walking_distance': int(transit.get('walking_distance', 0)),
+                        'distance': safe_int(transit.get('distance'), 0),
+                        'duration': safe_int(cost.get('duration'), 0),
+                        'transit_fee': safe_float(cost.get('transit_fee'), 0),
+                        'taxi_fee': safe_float(cost.get('taxi_fee'), 0),
+                        'walking_distance': safe_int(transit.get('walking_distance'), 0),
                         'lines': lines,
                         'segments': segments
                     })

@@ -11,7 +11,13 @@
           <!-- 搜索表单 -->
           <el-form :model="searchForm" @submit.prevent="handleSearch">
             <el-form-item label="城市">
-              <el-input v-model="searchForm.city" placeholder="请输入城市名称" />
+              <el-input v-model="searchForm.city" placeholder="请输入城市名称">
+                <template #append>
+                  <el-button @click="locateToMe" :loading="locating" title="定位到我">
+                    <el-icon><Aim /></el-icon>
+                  </el-button>
+                </template>
+              </el-input>
             </el-form-item>
             <el-form-item label="关键词">
               <el-input v-model="searchForm.keyword" placeholder="如：景点、博物馆" />
@@ -134,8 +140,8 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { Search, MagicStick, Document, Picture } from '@element-plus/icons-vue'
+import { ElMessage, ElNotification } from 'element-plus'
+import { Search, MagicStick, Document, Picture, Aim } from '@element-plus/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { searchAttractions, type Attraction } from '@/api/attraction'
 import { createTrip } from '@/api/trip'
@@ -152,6 +158,7 @@ const searchForm = ref({
 const loading = ref(false)
 const optimizing = ref(false)
 const saving = ref(false)
+const locating = ref(false)
 const attractions = ref<Attraction[]>([])
 const selectedAttractions = ref<Attraction[]>([])
 const saveTripDialogVisible = ref(false)
@@ -166,16 +173,21 @@ const tripForm = ref({
 let map: any = null
 let markers: any[] = []
 let polylines: any[] = []
+let geolocationControl: any = null
 
 // 初始化地图
 const initMap = async () => {
   try {
+    console.log('[地图] 初始化中...')
+    
+    // 加载高德地图
     const AMap = await AMapLoader.load({
       key: import.meta.env.VITE_AMAP_KEY,
       version: '2.0',
-      plugins: ['AMap.Marker', 'AMap.Polyline']
+      plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.Geolocation']
     })
 
+    // 初始化地图（默认北京）
     map = new AMap.Map('map', {
       zoom: 12,
       center: [116.397428, 39.90923],
@@ -183,11 +195,98 @@ const initMap = async () => {
     })
 
     mapStore.setMap(map)
+    
+    // 使用高德官方Geolocation插件（但不自动执行）
+    geolocationControl = new AMap.Geolocation({
+      enableHighAccuracy: false,
+      timeout: 10000,
+      useNative: true,
+      convert: true,
+      showButton: false,
+      showMarker: false,
+      showCircle: false,
+      panToLocation: true,
+      zoomToAccuracy: false
+    })
+    
+    map.addControl(geolocationControl)
+    
+    // 检测IPv6环境并提示
+    checkIPv6AndNotify()
+    
     console.log('地图初始化成功')
   } catch (error) {
     console.error('地图加载失败:', error)
     ElMessage.error('地图加载失败，请检查API密钥配置')
   }
+}
+
+// 检测IPv6环境并提示
+const checkIPv6AndNotify = async () => {
+  try {
+    // 调用后端检测IP
+    const response = await fetch('/api/v1/location/debug')
+    const data = await response.json()
+    
+    const detectedIP = data.detected_ip
+    const isPrivate = data.is_private
+    
+    // 判断是否为IPv6（包含冒号且冒号数量>=2）
+    const isIPv6 = detectedIP && detectedIP.includes(':') && detectedIP.split(':').length >= 2
+    
+    if (isIPv6 || !detectedIP || isPrivate) {
+      // 使用通知而不是消息框（更友好）
+      ElNotification({
+        title: '💡 自动定位提示',
+        dangerouslyUseHTMLString: true,
+        message: `
+          <div style="line-height: 1.6;">
+            <p><strong>检测到您的网络环境可能无法自动定位：</strong></p>
+            ${isIPv6 ? '<p>• 您使用的是IPv6网络（高德API仅支持IPv4）</p>' : ''}
+            ${isPrivate || !detectedIP ? '<p>• 您处于内网环境（如局域网）</p>' : ''}
+            <p style="margin-top: 8px;"><strong>解决方案：</strong></p>
+            <p>1️⃣ 点击城市输入框右侧的 <strong>📍定位按钮</strong>，使用浏览器定位</p>
+            <p>2️⃣ 或直接在输入框中输入城市名称</p>
+            <p style="color: #909399; font-size: 12px; margin-top: 8px;">
+              提示：生产环境部署后，IPv4用户可以自动定位
+            </p>
+          </div>
+        `,
+        type: 'info',
+        duration: 8000,
+        position: 'top-right'
+      })
+    }
+  } catch (error) {
+    console.log('[IPv6检测] 检测失败，跳过提示')
+  }
+}
+
+// 手动触发定位
+const locateToMe = () => {
+  if (!geolocationControl) {
+    ElMessage.warning('定位功能未初始化')
+    return
+  }
+  
+  locating.value = true
+  
+  geolocationControl.getCurrentPosition((status: string, result: any) => {
+    locating.value = false
+    
+    if (status === 'complete') {
+      console.log('[定位] 成功:', result.position)
+      ElMessage.success(`已定位到：${result.addressComponent?.city || '当前位置'}`)
+      
+      // 更新搜索表单城市
+      if (result.addressComponent?.city) {
+        searchForm.value.city = result.addressComponent.city
+      }
+    } else {
+      console.log('[定位] 失败:', result.message)
+      ElMessage.error('定位失败，请确保浏览器已允许位置访问权限')
+    }
+  })
 }
 
 // 搜索景点

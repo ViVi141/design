@@ -100,13 +100,17 @@ async def generate_complete_itinerary(request: GenerateRequest):
                     
                     if results and len(results) > 0:
                         poi = results[0]  # 取第一个结果
-                        # 更新景点信息
+                        # 更新景点信息（包含图片）
                         attraction.address = poi.get('address', '')
                         attraction.lng = poi.get('lng', 0)
                         attraction.lat = poi.get('lat', 0)
                         attraction.type = poi.get('type', '')
+                        attraction.rating = poi.get('rating', 0)
+                        attraction.tel = poi.get('tel', '')
+                        attraction.photos = poi.get('photos', [])
+                        attraction.thumbnail = poi.get('thumbnail', '')
                         
-                        print(f"  ✓ {attraction.name}: {attraction.address}")
+                        print(f"  ✓ {attraction.name}: {attraction.address} {'📷' if attraction.thumbnail else ''}")
                     else:
                         print(f"  ✗ {attraction.name}: 未找到详细信息")
                         
@@ -132,11 +136,12 @@ async def generate_complete_itinerary(request: GenerateRequest):
                 
                 if len(attractions_data) > 1:
                     try:
-                        # 使用TSP优化顺序（传入预算用于智能选择交通方式）
+                        # 使用TSP优化顺序（传入预算和城市用于智能选择交通方式）
                         optimized = await route_planner.optimize_route(
                             attractions_data,
                             budget=request.budget,
-                            days=request.days
+                            days=request.days,
+                            city=request.destination  # 传递城市参数
                         )
                         
                         # 更新景点顺序

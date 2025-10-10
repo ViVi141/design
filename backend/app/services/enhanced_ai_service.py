@@ -12,7 +12,7 @@ from app.core.config import settings
 
 
 class AttractionSchedule(BaseModel):
-    """景点时间安排"""
+    """景点时间安排（优化版：包含图片）"""
     name: str = Field(..., description="景点名称")
     start_time: str = Field(..., description="开始时间，如'09:00'")
     duration_hours: float = Field(..., description="游玩时长（小时）")
@@ -27,6 +27,8 @@ class AttractionSchedule(BaseModel):
     tel: Optional[str] = Field(None, description="电话（v5新增）")
     opentime: Optional[str] = Field(None, description="营业时间（v5新增）")
     business_area: Optional[str] = Field(None, description="所属商圈（v5新增）")
+    photos: Optional[List[str]] = Field(None, description="图片URL列表（v5新增）")
+    thumbnail: Optional[str] = Field(None, description="缩略图（第一张图片）")
 
 
 class HotelInfo(BaseModel):
@@ -76,23 +78,28 @@ class CompleteItinerary(BaseModel):
 
 
 class EnhancedAIService:
-    """增强版AI服务"""
+    """增强版AI服务（优化版）"""
     
     def __init__(self):
+        # 行程生成LLM - 使用平衡温度
         self.llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
             openai_api_key=settings.DEEPSEEK_API_KEY,
             openai_api_base=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
+            temperature=settings.AI_TEMPERATURE_BALANCED,
+            max_tokens=settings.AI_MAX_TOKENS,
+            timeout=settings.AI_TIMEOUT,
             model_kwargs={"response_format": {"type": "json_object"}}  # 强制JSON输出
         )
         
-        # 流式LLM（不强制JSON格式）
+        # 流式LLM - 更长的超时时间
         self.streaming_llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
             openai_api_key=settings.DEEPSEEK_API_KEY,
             openai_api_base=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
+            temperature=settings.AI_TEMPERATURE_BALANCED,
+            max_tokens=settings.AI_MAX_TOKENS,
+            timeout=settings.AI_STREAM_TIMEOUT,
             streaming=True  # 启用流式输出
         )
     
@@ -144,7 +151,8 @@ class EnhancedAIService:
         try:
             print("[流式API] 直接调用DeepSeek API...")
             
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            # 使用配置的流式超时时间
+            async with httpx.AsyncClient(timeout=settings.AI_STREAM_TIMEOUT) as client:
                 async with client.stream(
                     'POST',
                     f"{settings.DEEPSEEK_API_BASE}/chat/completions",
@@ -155,7 +163,8 @@ class EnhancedAIService:
                     json={
                         "model": settings.DEEPSEEK_MODEL,
                         "messages": messages_dict,
-                        "temperature": 0.7,
+                        "temperature": settings.AI_TEMPERATURE_BALANCED,
+                        "max_tokens": settings.AI_MAX_TOKENS,
                         "stream": True
                     }
                 ) as response:
@@ -269,29 +278,19 @@ class EnhancedAIService:
             raise
     
     def _build_prompt_template(self) -> ChatPromptTemplate:
-        """构建提示词模板"""
+        """构建优化的提示词模板（更精简高效）"""
         return ChatPromptTemplate.from_messages([
-            ("system", """你是一位经验丰富的旅行规划专家。
-你的任务是为用户生成一份详细、实用、可直接执行的旅行计划。
+            ("system", """你是专业的旅行规划专家，擅长生成高效实用的行程。
 
-核心原则：
-1. 行程安排要紧凑但不紧张，每天2-4个景点
-2. 景点之间距离合理，交通便利
-3. 住宿位置优先考虑交通便利性
-4. 严格控制预算，留10%余量
-5. 提供实用的旅行建议
+核心要求：
+1. 每天2-4个景点，路线合理
+2. 住宿交通便利，性价比高
+3. 预算控制在{budget}元内，留10%余量
+4. 景点真实存在，避免编造
 
-【输出要求】
-第一步：简要说明你的规划思路（1-2句话）
-第二步：返回完整的JSON格式数据
-
-例如：
-根据您的需求，我为您规划了一个3天的北京之旅，重点游览历史文化景点，总预算控制在3000元以内。
-
-```json
-{...}
-```
-"""),
+输出格式：
+先用1句话说明规划思路，然后返回JSON数据（用```json包裹）。
+JSON必须严格遵循示例格式，确保所有字段完整。"""),
             
                ("user", """请为我生成{destination}{days}天的详细旅行计划。
        
