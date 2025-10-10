@@ -282,9 +282,176 @@ GET /route/strategies
 }
 ```
 
-## 4. 行程模块
+## 4. Agent智能规划模块 🤖
 
-### 3.1 创建行程
+### 4.1 Agent对话 (基础版)
+
+```http
+POST /agent/chat
+```
+
+**说明**: 与AI Agent对话,Agent可主动调用工具获取真实数据
+
+**请求体**:
+```json
+{
+  "message": "我想去北京玩3天"
+}
+```
+
+**响应**:
+```json
+{
+  "reply": "好的,我来帮你规划北京3日游...",
+  "intermediate_steps": [
+    {
+      "tool": "search_attractions",
+      "input": {"city": "北京", "keyword": "景点", "limit": 10},
+      "output": "[...]"
+    }
+  ],
+  "tool_calls": [...]
+}
+```
+
+### 4.2 Agent流式对话 🆕
+
+```http
+POST /agent/stream
+```
+
+**说明**: 实时展示Agent思考过程,使用SSE流式推送
+
+**请求体**:
+```json
+{
+  "message": "规划成都3日游,预算3000元",
+  "destination": "成都",
+  "days": 3,
+  "budget": 3000,
+  "preferences": ["美食", "历史"]
+}
+```
+
+**响应(SSE流式)**:
+```
+data: {"type": "start", "content": "🤖 Agent开始执行..."}
+
+data: {"type": "tool_start", "tool": "search_attractions", "input": {...}}
+
+data: {"type": "tool_end", "tool": "search_attractions", "output": "..."}
+
+data: {"type": "llm_stream", "content": "根据您的需求..."}
+
+data: {"type": "itinerary", "data": {...}}
+
+data: {"type": "done", "content": "✅ 完成"}
+```
+
+### 4.3 Agent增强流式 🆕
+
+```http
+POST /agent/enhanced-stream
+```
+
+**说明**: 增强版流式响应,展示更详细的AI思考过程
+
+**请求体**: 同4.2
+
+**响应类型**:
+- `thinking` - AI思考过程
+- `deepseek` - DeepSeek推理状态
+- `tool_start` - 工具调用开始
+- `tool_end` - 工具调用完成
+- `llm_stream` - LLM输出流
+- `itinerary` - 结构化行程数据
+- `status` - 状态更新
+- `done` - 完成
+
+### 4.4 Agent可用工具
+
+AI Agent可以主动调用以下工具:
+
+#### 1. search_attractions - 搜索景点
+
+```json
+{
+  "city": "北京",
+  "keyword": "故宫",
+  "limit": 5
+}
+```
+
+#### 2. calculate_route - 计算路线
+
+```json
+{
+  "origin": "故宫",
+  "destination": "天安门",
+  "city": "北京",
+  "mode": "walking"  // walking, driving, transit, bicycling
+}
+```
+
+#### 3. optimize_route - 优化顺序(TSP)
+
+```json
+{
+  "attractions": ["故宫", "天安门", "王府井"],
+  "city": "北京"
+}
+```
+
+#### 4. search_hotels - 搜索住宿
+
+```json
+{
+  "city": "北京",
+  "location": "市中心",
+  "price_range": "经济型",
+  "limit": 5
+}
+```
+
+#### 5. get_weather - 获取天气
+
+```json
+{
+  "city": "北京"
+}
+```
+
+#### 6. get_multi_weather - 批量获取天气(并行)
+
+```json
+{
+  "cities": ["北京", "上海", "广州"]
+}
+```
+
+#### 7. search_food - 搜索美食
+
+```json
+{
+  "city": "北京",
+  "cuisine": "烤鸭",
+  "limit": 5
+}
+```
+
+#### 8. get_city_info - 获取城市信息
+
+```json
+{
+  "city": "北京"
+}
+```
+
+---
+
+## 5. 行程模块
+
+### 5.1 创建行程
 
 ```http
 POST /trips/?optimize=true
@@ -332,19 +499,19 @@ POST /trips/?optimize=true
 }
 ```
 
-### 3.2 获取行程列表
+### 5.2 获取行程列表
 
 ```http
 GET /trips/?skip=0&limit=20&destination=成都
 ```
 
-### 3.3 获取单个行程
+### 5.3 获取单个行程
 
 ```http
 GET /trips/{trip_id}
 ```
 
-### 3.4 更新行程
+### 5.4 更新行程
 
 ```http
 PUT /trips/{trip_id}
@@ -358,16 +525,111 @@ PUT /trips/{trip_id}
 }
 ```
 
-### 3.5 删除行程
+### 5.5 删除行程
 
 ```http
 DELETE /trips/{trip_id}
 ```
 
-### 3.6 优化行程路径
+### 5.6 优化行程路径
 
 ```http
 POST /trips/{trip_id}/optimize
+```
+
+---
+
+## 6. 性能监控模块 🆕
+
+### 6.1 获取性能统计
+
+```http
+GET /performance/stats
+```
+
+**响应**:
+```json
+{
+  "overall": {
+    "total_calls": 150,
+    "success_rate": 98.5,
+    "avg_duration": 2.3,
+    "min_duration": 0.01,
+    "max_duration": 8.5
+  },
+  "by_operation": {
+    "chat": {
+      "total_calls": 80,
+      "success_rate": 99.0,
+      "avg_duration": 1.5
+    }
+  }
+}
+```
+
+### 6.2 获取缓存信息
+
+```http
+GET /performance/cache/info
+```
+
+**响应**:
+```json
+{
+  "cache_size": 45,
+  "cache_hits": 120,
+  "cache_misses": 30,
+  "hit_rate": 80.0
+}
+```
+
+### 6.3 清空缓存
+
+```http
+POST /performance/cache/clear
+```
+
+---
+
+## 7. 城市信息模块 🆕
+
+### 7.1 获取支持的城市列表
+
+```http
+GET /cities/supported
+```
+
+**响应**:
+```json
+{
+  "cities": [
+    {"name": "北京", "citycode": "010", "adcode": "110000"},
+    {"name": "上海", "citycode": "021", "adcode": "310000"}
+  ],
+  "total": 100
+}
+```
+
+---
+
+## 8. IP定位模块 🆕
+
+### 8.1 根据IP获取位置
+
+```http
+GET /location/by-ip?ip=1.2.3.4
+```
+
+**说明**: 如果不传ip参数,高德API会自动使用请求来源IP
+
+**响应**:
+```json
+{
+  "province": "北京",
+  "city": "北京市",
+  "adcode": "110000",
+  "location": [116.4074, 39.9042]
+}
 ```
 
 ## 错误响应
