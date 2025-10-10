@@ -13,7 +13,7 @@ map_service = MapService()
 @router.post("/search", response_model=List[AttractionResponse])
 async def search_attractions(request: AttractionSearch):
     """
-    搜索景点
+    搜索景点（POST方法）
     
     Args:
         request: 搜索请求
@@ -27,6 +27,53 @@ async def search_attractions(request: AttractionSearch):
             keyword=request.keyword,
             types=request.types or "110000",
             limit=request.limit
+        )
+        
+        return [
+            AttractionResponse(
+                id=a['id'],
+                name=a['name'],
+                lng=a['lng'],
+                lat=a['lat'],
+                city=a.get('city'),
+                address=a.get('address'),
+                type=a.get('type'),
+                rating=a.get('rating'),
+                cost=a.get('cost'),
+                tel=a.get('tel'),
+                photos=a.get('photos', [])
+            )
+            for a in attractions
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"景点搜索失败: {str(e)}")
+
+
+@router.get("/search", response_model=List[AttractionResponse])
+async def search_attractions_get(
+    city: str = Query(..., description="城市名称"),
+    keyword: str = Query("景点", description="搜索关键词"),
+    types: str = Query("110000", description="POI类型"),
+    limit: int = Query(25, description="返回数量")
+):
+    """
+    搜索景点（GET方法）
+    
+    Args:
+        city: 城市名称
+        keyword: 搜索关键词
+        types: POI类型
+        limit: 返回数量
+        
+    Returns:
+        景点列表
+    """
+    try:
+        attractions = await map_service.search_attractions(
+            city=city,
+            keyword=keyword,
+            types=types,
+            limit=limit
         )
         
         return [

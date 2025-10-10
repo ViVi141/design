@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List
+from datetime import datetime, timedelta
 import json
 import asyncio
 
@@ -22,6 +23,7 @@ class EnhancedStreamRequest(BaseModel):
     days: int = 3
     budget: float = 5000
     preferences: list = None
+    departureDate: str = None  # 出发日期 YYYY-MM-DD
 
 
 @router.post("/enhanced-stream")
@@ -59,29 +61,55 @@ async def enhanced_agent_stream(request: EnhancedStreamRequest):
             monitor = get_monitor()
             agent = get_agent()
             
+            # 格式化出发日期信息
+            date_info = ""
+            if request.departureDate:
+                from datetime import datetime
+                try:
+                    dept_date = datetime.strptime(request.departureDate, '%Y-%m-%d')
+                    weekdays = ['一', '二', '三', '四', '五', '六', '日']
+                    weekday = weekdays[dept_date.weekday()]
+                    date_info = f"\n- 出发日期：{dept_date.month}月{dept_date.day}日（星期{weekday}）"
+                    
+                    # 计算每天的日期
+                    dates_list = []
+                    for i in range(request.days):
+                        day_date = dept_date + timedelta(days=i)
+                        day_weekday = weekdays[day_date.weekday()]
+                        dates_list.append(f"第{i+1}天={day_date.month}月{day_date.day}日(星期{day_weekday})")
+                    date_info += f"\n- 每天日期：{', '.join(dates_list)}"
+                except:
+                    pass
+            
             # 构建增强的提示
             enhanced_message = f"""
 用户需求：{request.message}
 
 目标信息：
 - 目的地：{request.destination or '待确定'}
-- 天数：{request.days}天
+- 天数：{request.days}天{date_info}
 - 预算：¥{request.budget}
 - 偏好：{', '.join(request.preferences) if request.preferences else '无'}
 
 请按照以下步骤规划：
-1. 先获取天气信息（使用get_weather工具）
+1. 先获取天气信息（使用get_multi_weather或get_weather工具）
+   - 根据出发日期和天气，合理安排室内/室外景点
+   - 下雨天多安排博物馆、商场等室内景点
+   - 晴天多安排户外风景区
 2. 搜索热门景点（使用search_attractions工具）
+   - 每天2-3个景点，地理位置接近
+   - 优先选择评分4.5+的景点
 3. 推荐住宿（使用search_hotels工具）
 4. 推荐美食（使用search_food工具）
-5. 优化路线（使用optimize_route工具，如果有3+景点）
+5. 优化路线（使用optimize_route工具，如果同城有3+景点）
 6. 综合以上信息，生成详细行程
 
-要求：
-- 主动调用所有相关工具
-- 给出具体的景点、住宿、美食推荐
-- 合理分配每天的景点数量
+⚠️ 重要要求：
+- 每天必须生成一个主题标题（如"泉城文化游"、"海滨风光"等）
+- 每天安排的景点必须在同一区域，距离不超过5km
+- 必须根据天气调整室内/室外景点安排
 - 计算总费用，确保在预算内
+- 输出JSON时，每天必须包含city和theme字段
 """
             
             # 发送开始信号
