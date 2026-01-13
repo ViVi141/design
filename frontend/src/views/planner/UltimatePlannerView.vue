@@ -2911,7 +2911,7 @@ async function generateDepartureTransport(departureName: string, firstLocation: 
 async function searchCityCenter(cityName: string) {
   try {
     const response = await fetch(
-      `https://restapi.amap.com/v3/config/district?keywords=${cityName}&subdistrict=0&key=REDACTED_API_KEYf`
+      `https://restapi.amap.com/v3/config/district?keywords=${cityName}&subdistrict=0&key=your_key`
     )
     const data = await response.json()
     

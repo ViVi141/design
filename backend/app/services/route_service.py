@@ -37,7 +37,7 @@ class RouteService:
     """路线规划服务（v5 API）"""
     
     def __init__(self):
-        self.api_key = "REDACTED_API_KEYf"
+        self.api_key = "your_key"
         self.base_url = "https://restapi.amap.com/v5"
     
     async def get_driving_route(

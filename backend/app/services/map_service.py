@@ -11,7 +11,7 @@ class MapService:
     
     def __init__(self):
         # Web服务API Key（用于后端REST API调用）
-        self.api_key = "REDACTED_API_KEYf"
+        self.api_key = "your_key"
         self.base_url = "https://restapi.amap.com/v3"
     
     async def search_attractions_v5(
